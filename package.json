@@ -1,0 +1,12 @@
+{
+  "name": "glx-zoho-sync",
+  "version": "1.0.0",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "node-cron": "^3.0.3"
+  }
+}
