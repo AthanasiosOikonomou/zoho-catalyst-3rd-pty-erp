@@ -1,6 +1,10 @@
 {
   "name": "glx-zoho-sync",
   "version": "1.0.0",
+  "author": {
+    "name": "Sakis Oikonomou",
+    "email": "ath.oikonomou@hotmail.com"
+  },
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js"
