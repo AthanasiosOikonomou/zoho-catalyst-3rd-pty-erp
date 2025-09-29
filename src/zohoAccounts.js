@@ -1,19 +1,45 @@
-// src/zohoAccounts.js
+/**
+ * Zoho Accounts Integration Module
+ * --------------------------------
+ * Provides functions for mapping Galaxy customer data to Zoho Accounts format,
+ * performing batch upsert/update operations, and retrieving watermarks from Zoho CRM.
+ * Handles API communication, data normalization, and error handling.
+ */
+
 const axios = require("axios");
 const { getZohoAccessToken, getZohoBaseUrl } = require("./zohoAuth");
 const cfg = require("./config");
 
+// Utility functions for data normalization.
 const normStr = (v) => (v == null ? undefined : String(v).trim());
-const normId = (v) => { const s = normStr(v); return s ? s.toUpperCase() : undefined; };
-const normDigits = (v) => { if (v == null) return undefined; const s = String(v).replace(/\D+/g, ""); return s.length ? s : undefined; };
-const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : undefined; };
+const normId = (v) => {
+  const s = normStr(v);
+  return s ? s.toUpperCase() : undefined;
+};
+const normDigits = (v) => {
+  if (v == null) return undefined;
+  const s = String(v).replace(/\D+/g, "");
+  return s.length ? s : undefined;
+};
+const num = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+};
 const normPhone = (v) => {
   if (!v) return null;
-  let s = String(v).trim().replace(/[.\-\s()]/g, "");
+  let s = String(v)
+    .trim()
+    .replace(/[.\-\s()]/g, "");
   if (!/^\+?\d{8,15}$/.test(s)) return null;
   return s;
 };
 
+/**
+ * Maps a Galaxy customer object to Zoho Account fields.
+ * Handles normalization and field mapping.
+ * @param {Object} gx - Galaxy customer object.
+ * @returns {Object} Zoho Account payload.
+ */
 function mapGalaxyToZohoAccount(gx) {
   const name =
     normStr(gx.TRDRNAME) ||
@@ -52,8 +78,20 @@ function mapGalaxyToZohoAccount(gx) {
 
 // NOTE: Using 100 as the Zoho batch size limit. Can be increased up to 200 for faster processing.
 const BATCH_SIZE = 100;
-const chunk = (arr, n) => Array.from({ length: Math.ceil(arr.length / n) }, (_, i) => arr.slice(i * n, i * n + n));
+// Utility to split arrays into chunks for batch processing.
+const chunk = (arr, n) =>
+  Array.from({ length: Math.ceil(arr.length / n) }, (_, i) =>
+    arr.slice(i * n, i * n + n)
+  );
 
+/**
+ * Makes an authenticated Zoho API call.
+ * @param {string} method - HTTP method.
+ * @param {string} path - API endpoint path.
+ * @param {Object|null} body - Request body.
+ * @param {Object|null} params - Query parameters.
+ * @returns {Promise<AxiosResponse>} API response.
+ */
 async function zohoApi(method, path, body, params) {
   const token = await getZohoAccessToken();
   const base = getZohoBaseUrl();
@@ -86,18 +124,20 @@ async function mapExistingByTraderId(ids) {
   if (!vals.length) return out;
 
   // Format Trader IDs for IN clause in COQL: ('ID1', 'ID2', ...)
-  const formattedIds = vals.map(v => `'${String(v).replace(/'/g, "\\'")}'`).join(', ');
+  const formattedIds = vals
+    .map((v) => `'${String(v).replace(/'/g, "\\'")}'`)
+    .join(", ");
 
   // Query remains unchanged
-  const selectQuery = `select id, Trader_ID from Accounts where Trader_ID in (${formattedIds})`; 
-  
+  const selectQuery = `select id, Trader_ID from Accounts where Trader_ID in (${formattedIds})`;
+
   const coqlBody = {
-    select_query: selectQuery
+    select_query: selectQuery,
   };
 
   try {
-    const res = await zohoApi("POST", "/crm/v2/coql", coqlBody, null); 
-    
+    const res = await zohoApi("POST", "/crm/v2/coql", coqlBody, null);
+
     if (res.status === 200 && Array.isArray(res.data?.data)) {
       for (const rec of res.data.data) {
         const traderId = normId(rec.Trader_ID);
@@ -114,14 +154,12 @@ async function mapExistingByTraderId(ids) {
   return out;
 }
 
-
 /**
  * Retrieves the maximum Rev_Number from Zoho Accounts in a single efficient API call.
- * This is the robust solution when COQL MAX() aggregation fails.
+ * Used for watermarking and incremental sync.
  * @returns {Promise<number>} The maximum Rev_Number, or 0 if none found.
  */
 async function getMaxZohoRevNumber() {
-  
   try {
     // 1. Order by Rev_Number descending, and fetch only 1 record
     const res = await zohoApi("GET", "/crm/v2/Accounts", null, {
@@ -129,29 +167,40 @@ async function getMaxZohoRevNumber() {
       sort_by: "Rev_Number",
       sort_order: "desc",
       per_page: 1, // Only need the top record
-      page: 1
+      page: 1,
     });
 
     if (res.status !== 200) {
-      console.log(`[ZOHO] Max Rev Fetch failed (status ${res.status}). Response:`, res.data);
+      console.log(
+        `[ZOHO] Max Rev Fetch failed (status ${res.status}). Response:`,
+        res.data
+      );
       return 0;
     }
-    
+
     const records = Array.isArray(res.data?.data) ? res.data.data : [];
 
     if (records.length > 0) {
       const rev = Number(records[0].Rev_Number);
       return Number.isFinite(rev) ? rev : 0;
     }
-    
+
     return 0; // No records found
   } catch (err) {
-    console.error("[ZOHO] Max Rev Fetch API call error:", err.message || String(err));
+    console.error(
+      "[ZOHO] Max Rev Fetch API call error:",
+      err.message || String(err)
+    );
     return 0;
   }
 }
 
-
+/**
+ * Splits mapped records into update and insert groups based on existence in Zoho.
+ * Removes internal fields not meant for Zoho API payload.
+ * @param {Array<Object>} mapped - Array of mapped Zoho Account objects.
+ * @returns {Object} { toUpdate, toInsert }
+ */
 function splitUpdatesInserts(mapped) {
   const toUpdate = [];
   const toInsert = [];
@@ -161,7 +210,7 @@ function splitUpdatesInserts(mapped) {
     delete payload.__GX_TRDRID;
     delete payload.__GX_TIN;
     delete payload.__GX_NAME;
-    
+
     // CRITICAL: The internal __matchId is extracted
     const matchId = payload.__matchId;
     delete payload.__matchId;
@@ -169,8 +218,7 @@ function splitUpdatesInserts(mapped) {
     if (matchId) {
       // For UPDATES (Zoho API PUT), the payload MUST include the Zoho 'id'
       toUpdate.push({ id: matchId, ...payload });
-    }
-    else {
+    } else {
       // For INSERTS/UPSERTS (Zoho API POST), the payload MUST NOT include the 'id'
       toInsert.push(payload);
     }
@@ -178,11 +226,19 @@ function splitUpdatesInserts(mapped) {
   return { toUpdate, toInsert };
 }
 
+/**
+ * Performs batch update of Zoho Accounts using PUT requests.
+ * Processes results and aggregates success/failure counts.
+ * @param {Array<Object>} records - Records to update.
+ * @returns {Promise<Object>} Update result summary.
+ */
 async function batchUpdateAccounts(records) {
-  let success = 0, failed = 0, details = [];
-  
+  let success = 0,
+    failed = 0,
+    details = [];
+
   // OPTIMIZATION: Prepare all API calls and run them in parallel
-  const apiPromises = chunk(records, BATCH_SIZE).map(group => 
+  const apiPromises = chunk(records, BATCH_SIZE).map((group) =>
     zohoApi("PUT", "/crm/v2/Accounts", { data: group })
   );
   const allResults = await Promise.all(apiPromises);
@@ -190,29 +246,56 @@ async function batchUpdateAccounts(records) {
   // Process results from all concurrent calls
   for (const res of allResults) {
     // Determine how many records were in this group to accurately count failures
-    const groupSize = Array.isArray(res.data?.data) ? res.data.data.length : (res.config.data ? JSON.parse(res.config.data).data.length : BATCH_SIZE);
-    
+    const groupSize = Array.isArray(res.data?.data)
+      ? res.data.data.length
+      : res.config.data
+      ? JSON.parse(res.config.data).data.length
+      : BATCH_SIZE;
+
     if (res.status !== 200 || !Array.isArray(res.data?.data)) {
       failed += groupSize;
-      details.push({ status: "http_error", httpStatus: res.status, payload: res.data });
+      details.push({
+        status: "http_error",
+        httpStatus: res.status,
+        payload: res.data,
+      });
       continue;
     }
     for (const row of res.data.data) {
       if (row.status === "success") {
-        success += 1; details.push({ status: "success", action: row.action, id: row.details?.id });
+        success += 1;
+        details.push({
+          status: "success",
+          action: row.action,
+          id: row.details?.id,
+        });
       } else {
-        failed += 1; details.push({ status: "error", code: row.code, message: row.message, details: row.details });
+        failed += 1;
+        details.push({
+          status: "error",
+          code: row.code,
+          message: row.message,
+          details: row.details,
+        });
       }
     }
   }
   return { success, failed, details };
 }
 
+/**
+ * Performs batch insert/upsert of Zoho Accounts using POST requests.
+ * Processes results and aggregates success/failure counts.
+ * @param {Array<Object>} records - Records to insert/upsert.
+ * @returns {Promise<Object>} Insert result summary.
+ */
 async function batchInsertOrUpsertAccounts(records) {
-  let success = 0, failed = 0, details = [];
-  
+  let success = 0,
+    failed = 0,
+    details = [];
+
   // OPTIMIZATION: Prepare all API calls and run them in parallel
-  const apiPromises = chunk(records, BATCH_SIZE).map(group => 
+  const apiPromises = chunk(records, BATCH_SIZE).map((group) =>
     zohoApi(
       "POST",
       "/crm/v2/Accounts/upsert",
@@ -225,28 +308,56 @@ async function batchInsertOrUpsertAccounts(records) {
   // Process results from all concurrent calls
   for (const res of allResults) {
     // Determine how many records were in this group to accurately count failures
-    const groupSize = Array.isArray(res.data?.data) ? res.data.data.length : (res.config.data ? JSON.parse(res.config.data).data.length : BATCH_SIZE);
+    const groupSize = Array.isArray(res.data?.data)
+      ? res.data.data.length
+      : res.config.data
+      ? JSON.parse(res.config.data).data.length
+      : BATCH_SIZE;
 
     if (res.status !== 200 || !Array.isArray(res.data?.data)) {
       failed += groupSize;
-      details.push({ status: "http_error", httpStatus: res.status, payload: res.data });
+      details.push({
+        status: "http_error",
+        httpStatus: res.status,
+        payload: res.data,
+      });
       continue;
     }
     for (const row of res.data.data) {
       if (row.status === "success") {
-        success += 1; details.push({ status: "success", action: row.action, id: row.details?.id });
+        success += 1;
+        details.push({
+          status: "success",
+          action: row.action,
+          id: row.details?.id,
+        });
       } else {
-        failed += 1; details.push({ status: "error", code: row.code, message: row.message, details: row.details });
+        failed += 1;
+        details.push({
+          status: "error",
+          code: row.code,
+          message: row.message,
+          details: row.details,
+        });
       }
     }
   }
   return { success, failed, details };
 }
 
+/**
+ * Main function to upsert Galaxy customer items into Zoho Accounts.
+ * Handles mapping, duplicate detection, batch update/insert, and result aggregation.
+ * @param {Array<Object>} galaxyItems - Array of Galaxy customer objects.
+ * @param {Object} options - Options (e.g., debug).
+ * @returns {Promise<Object>} Upsert result summary.
+ */
 async function upsertAccounts(galaxyItems, { debug } = {}) {
   const totalIn = Array.isArray(galaxyItems) ? galaxyItems.length : 0;
   console.log(`[ZOHO] upsertAccounts() received ${totalIn} galaxy item(s).`);
-  const mappedAll = (Array.isArray(galaxyItems) ? galaxyItems : []).map(mapGalaxyToZohoAccount);
+  const mappedAll = (Array.isArray(galaxyItems) ? galaxyItems : []).map(
+    mapGalaxyToZohoAccount
+  );
 
   const mapped = [];
   let dropped = 0;
@@ -255,7 +366,9 @@ async function upsertAccounts(galaxyItems, { debug } = {}) {
       dropped++;
       if (process.env.DEBUG === "1") {
         console.warn("[ZOHO] Dropping item with no Account_Name", {
-          Trader_ID: m.__GX_TRDRID, TIN: m.__GX_TIN, Name: m.__GX_NAME
+          Trader_ID: m.__GX_TRDRID,
+          TIN: m.__GX_TIN,
+          Name: m.__GX_NAME,
         });
       }
       continue;
@@ -265,7 +378,8 @@ async function upsertAccounts(galaxyItems, { debug } = {}) {
       dropped++;
       if (process.env.DEBUG === "1") {
         console.warn("[ZOHO] Dropping item with no Trader_ID", {
-          Trader_ID: m.__GX_TRDRID, Name: m.__GX_NAME
+          Trader_ID: m.__GX_TRDRID,
+          Name: m.__GX_NAME,
         });
       }
       continue;
@@ -274,12 +388,19 @@ async function upsertAccounts(galaxyItems, { debug } = {}) {
   }
   console.log(`[ZOHO] Mapped ${mapped.length} item(s). Dropped: ${dropped}.`);
   if (mapped.length === 0) {
-    return { success: 0, failed: 0, details: [], debug: { toUpdate: 0, toInsert: 0, dropped } };
+    return {
+      success: 0,
+      failed: 0,
+      details: [],
+      debug: { toUpdate: 0, toInsert: 0, dropped },
+    };
   }
 
   // --- SEARCH BY TRADER_ID USING COQL (Single API call) ---
   const traderIds = mapped.map((x) => x.Trader_ID);
-  console.log(`[ZOHO] Starting COQL lookup of ${traderIds.length} Trader_ID(s) in Zoho.`);
+  console.log(
+    `[ZOHO] Starting COQL lookup of ${traderIds.length} Trader_ID(s) in Zoho.`
+  );
 
   const byTraderId = await mapExistingByTraderId(traderIds);
   for (const r of mapped) {
@@ -289,21 +410,36 @@ async function upsertAccounts(galaxyItems, { debug } = {}) {
   // --- END OF SEARCH ---
 
   const { toUpdate, toInsert } = splitUpdatesInserts(mapped);
-  console.log(`[ZOHO] Prepared toUpdate=${toUpdate.length}, toInsert=${toInsert.length}`);
+  console.log(
+    `[ZOHO] Prepared toUpdate=${toUpdate.length}, toInsert=${toInsert.length}`
+  );
 
   // 1. Update existing records found by COQL
-  const upd = toUpdate.length ? await batchUpdateAccounts(toUpdate) : { success: 0, failed: 0, details: [] };
-  
+  const upd = toUpdate.length
+    ? await batchUpdateAccounts(toUpdate)
+    : { success: 0, failed: 0, details: [] };
+
   // 2. Insert/Upsert new records, relying on Zoho's duplicate check for Trader_ID
-  const ins = toInsert.length ? await batchInsertOrUpsertAccounts(toInsert) : { success: 0, failed: 0, details: [] };
+  const ins = toInsert.length
+    ? await batchInsertOrUpsertAccounts(toInsert)
+    : { success: 0, failed: 0, details: [] };
 
   const result = {
     success: upd.success + ins.success,
     failed: upd.failed + ins.failed,
     details: [...upd.details, ...ins.details],
   };
-  if (debug) result.debug = { toUpdate: toUpdate.length, toInsert: toInsert.length, dropped };
+  if (debug)
+    result.debug = {
+      toUpdate: toUpdate.length,
+      toInsert: toInsert.length,
+      dropped,
+    };
   return result;
 }
 
-module.exports = { upsertAccounts, mapGalaxyToZohoAccount, getMaxZohoRevNumber };
+module.exports = {
+  upsertAccounts,
+  mapGalaxyToZohoAccount,
+  getMaxZohoRevNumber,
+};

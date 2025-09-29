@@ -1,7 +1,18 @@
-// src/config.js
+/**
+ * Configuration Module
+ * --------------------
+ * Loads and validates environment variables for application settings,
+ * including API credentials, session management, scheduling, and Zoho integration.
+ */
+
 require("dotenv").config();
 
-// sanitize quotes/whitespace that often sneak into .env on Windows
+/**
+ * Cleans up a string value by removing leading/trailing quotes and whitespace.
+ * Useful for sanitizing .env values on Windows.
+ * @param {string} s - The string to clean.
+ * @returns {string} The cleaned string.
+ */
 function cleanUrl(s) {
   return String(s || "")
     .trim()
@@ -9,6 +20,10 @@ function cleanUrl(s) {
     .replace(/^'+|'+$/g, ""); // strip leading/trailing '
 }
 
+/**
+ * Application configuration object.
+ * Populated from environment variables and includes validation for required fields.
+ */
 const cfg = {
   baseURL: cleanUrl(process.env.BASE_URL),
   username: process.env.AUTH_USERNAME,
@@ -25,7 +40,7 @@ const cfg = {
   },
 };
 
-// validate required config early with helpful errors
+// Validate required configuration values early and provide helpful error messages.
 if (!cfg.baseURL) {
   throw new Error(
     "Missing BASE_URL in .env (e.g., BASE_URL=http://192.168.0.135 — no quotes)"

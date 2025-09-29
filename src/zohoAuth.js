@@ -1,19 +1,34 @@
-// src/zohoAuth.js
+/**
+ * Zoho Authentication Module
+ * --------------------------
+ * Handles OAuth authentication and API base URL resolution for Zoho CRM integration.
+ * Manages access token caching and refresh logic for efficient API communication.
+ */
+
 const axios = require("axios");
 const cfg = require("./config");
 
-// Map Zoho data centers → base domains
+/**
+ * Maps Zoho data center codes to their respective base domains.
+ * @param {string} dcRaw - Raw data center code (e.g., 'eu').
+ * @returns {Object} Domain mapping for accounts and API.
+ */
 function zohoDomains(dcRaw) {
   const dc = String(dcRaw || "").toLowerCase();
   const map = {
     eu: {
       accounts: "https://accounts.zoho.eu",
       api: "https://www.zohoapis.eu",
-    }
+    },
   };
   return map[dc];
 }
 
+/**
+ * Returns the Zoho API base URL for the configured data center.
+ * @returns {string} Zoho API base URL.
+ * @throws Will throw if the data center is invalid.
+ */
 function getZohoBaseUrl() {
   const dom = zohoDomains(cfg.zoho.dc);
   if (!dom || !dom.api) {
@@ -24,8 +39,15 @@ function getZohoBaseUrl() {
   return dom.api;
 }
 
+// In-memory cache for Zoho OAuth access token.
 let tokenCache = { accessToken: null, expiresAt: 0 };
 
+/**
+ * Retrieves a valid Zoho OAuth access token, refreshing if expired.
+ * Caches the token for reuse until shortly before expiration.
+ * @returns {Promise<string>} Zoho access token.
+ * @throws Will throw if authentication fails or configuration is missing.
+ */
 async function getZohoAccessToken() {
   const now = Date.now();
   // Refresh 10 seconds early
@@ -73,7 +95,7 @@ async function getZohoAccessToken() {
 
   tokenCache.accessToken = res.data.access_token;
   // Expires in (seconds) * 1000 (ms)
-  tokenCache.expiresAt = now + Number(res.data.expires_in || 3600) * 1000; 
+  tokenCache.expiresAt = now + Number(res.data.expires_in || 3600) * 1000;
   return tokenCache.accessToken;
 }
 
