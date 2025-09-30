@@ -7,11 +7,17 @@
  */
 
 const cfg = require("./config");
-const { authenticate } = require("./auth");
-const { createApiClient } = require("./apiClient");
-const { fetchCustomers, maxThirdPartyRevNum } = require("./customers");
-const SessionStore = require("./sessionStore");
-const { upsertAccounts, getMaxZohoRevNumber } = require("./zohoAccounts"); // RevStore import removed
+const { authenticate } = require("./auth/auth.js");
+const { createApiClient } = require("./api/apiClient");
+const {
+  fetchGalaxyData,
+  maxThirdPartyRevNum,
+} = require("./utils/fetchDataGlx.js");
+const SessionStore = require("./utils/sessionStore");
+const {
+  upsertAccounts,
+  getMaxZohoRevNumber,
+} = require("./accounts/pushAccountsZoho.js"); // RevStore import removed
 
 /**
  * Main job logic executed once per run.
@@ -50,7 +56,11 @@ async function runJobOnce() {
 
   let res;
   try {
-    res = await fetchCustomers(api, maxZohoRev);
+    res = await fetchGalaxyData(
+      api,
+      "/api/glx/views/Customer/custom/zh_Customers_fin",
+      maxZohoRev 
+    );
   } catch (err) {
     // ⚡️ FIX 1: Log the error object directly here to capture network issues (timeouts, SSL errors)
     console.error(
@@ -68,7 +78,11 @@ async function runJobOnce() {
     console.warn(`[AUTH] Session invalid (status ${s1}). Re-authenticating...`);
     await doAuthAndPersist();
     try {
-      res = await fetchCustomers(api, maxZohoRev);
+      res = await fetchGalaxyData(
+        api,
+        "/api/glx/views/Customer/custom/zh_Customers_fin",
+        maxZohoRev 
+      );
     } catch (err) {
       // ⚡️ FIX 2: Log re-authentication fetch failure
       console.error(

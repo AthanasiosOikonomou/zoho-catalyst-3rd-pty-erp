@@ -5,8 +5,6 @@
  * including API credentials, session management, scheduling, and Zoho integration.
  */
 
-require("dotenv").config();
-
 /**
  * Cleans up a string value by removing leading/trailing quotes and whitespace.
  * Useful for sanitizing .env values on Windows.
