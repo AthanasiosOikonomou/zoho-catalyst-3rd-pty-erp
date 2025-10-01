@@ -18,7 +18,7 @@ const cfg = {
   password: process.env.AUTH_PASSWORD,
   ssPid: process.env.SS_PID_COOKIE || null,
   cronExpr: process.env.CRON || "* * * * *", // dev default: every minute
-  timeoutMs: Number(process.env.TIMEOUT_MS || 8000), // tighter default for faster fail
+  timeoutMs: Number(process.env.TIMEOUT_MS || 20000), // tighter default for faster fail
   sessionFile: process.env.SESSION_FILE || "./.session.json",
   zoho: {
     clientId: process.env.ZOHO_CLIENT_ID,

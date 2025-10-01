@@ -1,9 +1,5 @@
 /**
- * Zoho Accounts Integration (Upsert-only, no COQL)
- * ------------------------------------------------
- * - Maps Galaxy customers to Zoho Accounts
- * - Upserts all via /crm/v8/Accounts/upsert with duplicate_check_fields=Trader_ID
- * - (Kept) getMaxZohoRevNumber() for watermark
+ * Zoho Accounts Integration (Upsert-only, with Affiliate_To)
  */
 
 const axios = require("axios");
@@ -14,7 +10,6 @@ const cfg = require("../config");
 const keepAliveAgent = new https.Agent({ keepAlive: true });
 const BATCH_SIZE = 200;
 
-// ---------- normalization helpers ----------
 const normStr = (v) => (v == null ? undefined : String(v).trim());
 const normId = (v) => {
   const s = normStr(v);
@@ -38,7 +33,6 @@ const normPhone = (v) => {
   return s;
 };
 
-// ---------- Zoho API helper ----------
 async function zohoApi(method, path, body, params) {
   const token = await getZohoAccessToken();
   const base = getZohoBaseUrl();
@@ -60,7 +54,6 @@ async function zohoApi(method, path, body, params) {
   });
 }
 
-// ---------- mapper (Galaxy -> Zoho Accounts) ----------
 function mapGalaxyToZohoAccount(gx) {
   const name =
     normStr(gx.TRDRNAME) ||
@@ -98,8 +91,7 @@ function mapGalaxyToZohoAccount(gx) {
 }
 
 /**
- * Fetch the maximum Rev_Number from Zoho Accounts.
- * (Kept from the previous version; efficient for watermarking.)
+ * Efficient watermark for Galaxy.
  */
 async function getMaxZohoRevNumber() {
   try {
@@ -135,8 +127,9 @@ async function getMaxZohoRevNumber() {
 }
 
 /**
- * Upsert Accounts.
- * - affiliateIdByCustomerTrdrId: Map<customer TRDRID, affiliate Zoho ID>
+ * Upsert Accounts with optional Affiliate_To lookup (by Zoho ID).
+ * @param {Array<Object>} galaxyItems
+ * @param {{ debug?: boolean, affiliateIdByCustomerTrdrId?: Map<string,string> }} options
  */
 async function upsertAccounts(
   galaxyItems,
@@ -145,9 +138,11 @@ async function upsertAccounts(
   const totalIn = Array.isArray(galaxyItems) ? galaxyItems.length : 0;
   console.log(`[ZOHO] upsertAccounts() received ${totalIn} galaxy item(s).`);
 
-  // Map and filter invalids
   const mapped = [];
   let dropped = 0;
+  let affiliateAttachedCount = 0;
+  const affiliateAttachSamples = [];
+
   for (const gx of Array.isArray(galaxyItems) ? galaxyItems : []) {
     const m = mapGalaxyToZohoAccount(gx);
     if (!m.Account_Name) {
@@ -172,15 +167,21 @@ async function upsertAccounts(
       continue;
     }
 
-    // Inject affiliate lookup if we have it for this customer TRDRID
+    // Attach Affiliate_To lookup if we have it for this customer TRDRID
     if (affiliateIdByCustomerTrdrId && m.Trader_ID) {
       const affZohoId = affiliateIdByCustomerTrdrId.get(m.Trader_ID);
       if (affZohoId) {
-        m.Affiliate_To = { id: affZohoId }; // lookup to Accounts
+        m.Affiliate_To = { id: affZohoId };
+        affiliateAttachedCount++;
+        if (affiliateAttachSamples.length < 5) {
+          affiliateAttachSamples.push({
+            Trader_ID: m.Trader_ID,
+            Affiliate_To: affZohoId,
+          });
+        }
       }
     }
 
-    // Remove internal debug fields before send
     delete m.__GX_TRDRID;
     delete m.__GX_TIN;
     delete m.__GX_NAME;
@@ -189,11 +190,23 @@ async function upsertAccounts(
   }
 
   console.log(`[ZOHO] Mapped ${mapped.length} item(s). Dropped: ${dropped}.`);
+  console.log(
+    `[ZOHO] Affiliate lookups attached: ${affiliateAttachedCount}${
+      affiliateAttachSamples.length
+        ? " (sample: " + JSON.stringify(affiliateAttachSamples) + ")"
+        : ""
+    }`
+  );
+
   if (!mapped.length) {
-    return { success: 0, failed: 0, details: [], debug: { dropped } };
+    return {
+      success: 0,
+      failed: 0,
+      details: [],
+      debug: { dropped, affiliateAttachedCount },
+    };
   }
 
-  // Batch upsert only
   const groups = Array.from(
     { length: Math.ceil(mapped.length / BATCH_SIZE) },
     (_, i) => mapped.slice(i * BATCH_SIZE, i * BATCH_SIZE + BATCH_SIZE)
@@ -227,7 +240,8 @@ async function upsertAccounts(
       });
       continue;
     }
-    for (const row of res.data.data) {
+    for (let i = 0; i < res.data.data.length; i++) {
+      const row = res.data.data[i];
       if (row.status === "success") {
         success += 1;
         details.push({
@@ -248,7 +262,8 @@ async function upsertAccounts(
   }
 
   const out = { success, failed, details };
-  if (debug) out.debug = { dropped };
+  if (debug)
+    out.debug = { dropped, affiliateAttachedCount, affiliateAttachSamples };
   return out;
 }
 

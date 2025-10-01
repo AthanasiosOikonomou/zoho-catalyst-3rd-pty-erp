@@ -1,8 +1,10 @@
 /**
  * Upsert Affiliates into Zoho Accounts
  * ------------------------------------
- * Maps Galaxy Affiliates records to Zoho Accounts and upserts them,
- * returning a map: affiliate Trader_ID -> Zoho ID
+ * Trader_ID = AFFILIATES_TRDRID
+ * Account_Name = AFF_NAME
+ * Account_AFM = AFF_TIN
+ * Rev_Number = AFFILIATES_REVNUM
  */
 
 const axios = require("axios");
@@ -13,7 +15,6 @@ const cfg = require("../config");
 const keepAliveAgent = new https.Agent({ keepAlive: true });
 const BATCH_SIZE = 200;
 
-// --- small utils (copied from accounts mapper to keep consistent) ---
 const normStr = (v) => (v == null ? undefined : String(v).trim());
 const normId = (v) => {
   const s = normStr(v);
@@ -24,7 +25,6 @@ const num = (v) => {
   return Number.isFinite(n) ? n : undefined;
 };
 
-// Zoho API helper with keep-alive
 async function zohoApi(method, path, body, params) {
   const token = await getZohoAccessToken();
   const base = getZohoBaseUrl();
@@ -46,13 +46,6 @@ async function zohoApi(method, path, body, params) {
   });
 }
 
-/**
- * Map a single affiliate record to Zoho Account payload
- * Trader_ID = AFFILIATES_TRDRID
- * Account_Name = AFF_NAME
- * Account_AFM = AFF_TIN
- * Rev_Number = AFFILIATES_REVNUM
- */
 function mapAffToZohoAccount(row) {
   return {
     Trader_ID: normId(row?.AFFILIATES_TRDRID),
@@ -64,14 +57,14 @@ function mapAffToZohoAccount(row) {
 }
 
 /**
- * Upsert affiliates; return { success, failed, idByTraderId: Map<string,string>, details[] }
+ * Upsert affiliates and return Zoho ID map: Trader_ID -> ZohoID
  */
 async function upsertAffiliates(affRows, { debug } = {}) {
   const mappedAll = (Array.isArray(affRows) ? affRows : []).map(
     mapAffToZohoAccount
   );
 
-  // Deduplicate by Trader_ID and keep the latest Rev_Number (highest)
+  // Deduplicate by Trader_ID keeping latest Rev_Number
   const byTrader = new Map();
   for (const rec of mappedAll) {
     if (!rec.Trader_ID || !rec.Account_Name) continue;
@@ -81,10 +74,20 @@ async function upsertAffiliates(affRows, { debug } = {}) {
     }
   }
   const mapped = Array.from(byTrader.values());
-  if (debug)
-    console.log(
-      `[AFF->ZOHO] Prepared ${mapped.length} affiliate record(s) for upsert.`
-    );
+  console.log(
+    `[AFF->ZOHO] Affiliates mapped (unique by Trader_ID): ${mapped.length}`
+  );
+
+  if (debug) {
+    const sample = mapped
+      .slice(0, 5)
+      .map((x) => ({
+        Trader_ID: x.Trader_ID,
+        Account_Name: x.Account_Name,
+        Rev_Number: x.Rev_Number,
+      }));
+    console.log("[AFF->ZOHO] Sample mapped:", sample);
+  }
 
   if (!mapped.length)
     return { success: 0, failed: 0, idByTraderId: new Map(), details: [] };
@@ -147,6 +150,14 @@ async function upsertAffiliates(affRows, { debug } = {}) {
         });
       }
     }
+  }
+
+  console.log(
+    `[AFF->ZOHO] Upsert result → success: ${success}, failed: ${failed}, idMap size: ${idByTraderId.size}`
+  );
+  if (debug) {
+    const sample = Array.from(idByTraderId.entries()).slice(0, 5);
+    console.log("[AFF->ZOHO] Sample Trader_ID→ZohoID:", sample);
   }
 
   return { success, failed, idByTraderId, details };
