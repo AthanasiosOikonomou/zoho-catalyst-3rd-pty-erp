@@ -1,18 +1,15 @@
 /**
  * Zoho Authentication Module
  * --------------------------
- * Handles OAuth authentication and API base URL resolution for Zoho CRM integration.
- * Manages access token caching and refresh logic for efficient API communication.
+ * Handles OAuth authentication and base URL resolution for Zoho CRM integration.
  */
 
 const axios = require("axios");
+const https = require("https");
 const cfg = require("../config");
 
-/**
- * Maps Zoho data center codes to their respective base domains.
- * @param {string} dcRaw - Raw data center code (e.g., 'eu').
- * @returns {Object} Domain mapping for accounts and API.
- */
+const keepAliveAgent = new https.Agent({ keepAlive: true });
+
 function zohoDomains(dcRaw) {
   const dc = String(dcRaw || "").toLowerCase();
   const map = {
@@ -24,11 +21,6 @@ function zohoDomains(dcRaw) {
   return map[dc];
 }
 
-/**
- * Returns the Zoho API base URL for the configured data center.
- * @returns {string} Zoho API base URL.
- * @throws Will throw if the data center is invalid.
- */
 function getZohoBaseUrl() {
   const dom = zohoDomains(cfg.zoho.dc);
   if (!dom || !dom.api) {
@@ -39,18 +31,10 @@ function getZohoBaseUrl() {
   return dom.api;
 }
 
-// In-memory cache for Zoho OAuth access token.
 let tokenCache = { accessToken: null, expiresAt: 0 };
 
-/**
- * Retrieves a valid Zoho OAuth access token, refreshing if expired.
- * Caches the token for reuse until shortly before expiration.
- * @returns {Promise<string>} Zoho access token.
- * @throws Will throw if authentication fails or configuration is missing.
- */
 async function getZohoAccessToken() {
   const now = Date.now();
-  // Refresh 10 seconds early
   if (tokenCache.accessToken && now < tokenCache.expiresAt - 10_000) {
     return tokenCache.accessToken;
   }
@@ -61,8 +45,6 @@ async function getZohoAccessToken() {
       `Invalid ZOHO_DC "${cfg.zoho.dc}" (no accounts URL). Use: us, eu, in, au, jp, ca.`
     );
   }
-
-  // Basic validation so you get a friendly error early
   if (!cfg.zoho.clientId || !cfg.zoho.clientSecret || !cfg.zoho.refreshToken) {
     throw new Error(
       "Missing Zoho OAuth env: ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET, ZOHO_REFRESH_TOKEN"
@@ -77,12 +59,12 @@ async function getZohoAccessToken() {
     client_secret: cfg.zoho.clientSecret,
   };
 
-  // NOTE: Removed keepAlive agents for quick job termination
   const res = await axios.post(url, null, {
     params,
     timeout: cfg.timeoutMs,
     validateStatus: () => true,
     proxy: false,
+    httpsAgent: keepAliveAgent,
   });
 
   if (res.status !== 200 || !res.data?.access_token) {
@@ -94,7 +76,6 @@ async function getZohoAccessToken() {
   }
 
   tokenCache.accessToken = res.data.access_token;
-  // Expires in (seconds) * 1000 (ms)
   tokenCache.expiresAt = now + Number(res.data.expires_in || 3600) * 1000;
   return tokenCache.accessToken;
 }
