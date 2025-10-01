@@ -18,6 +18,8 @@ const {
   upsertAccounts,
   getMaxZohoRevNumber,
 } = require("./accounts/pushAccountsZoho.js"); // RevStore import removed
+// src/index.js
+const { fetchAffiliatesSince } = require("./accounts/fetchAffiliates.js");
 
 /**
  * Main job logic executed once per run.
@@ -125,9 +127,66 @@ async function runJobOnce() {
 
   const fullItems = Array.isArray(res.data?.Items) ? res.data.Items : [];
   console.log(`[CUSTOMERS] Received ${fullItems.length} item(s).`);
+
   if (fullItems.length === 0) {
     console.log("[CUSTOMERS] No new/updated items.");
     return { ok: true, processed: 0, success: 0, failed: 0 };
+  }
+
+  // NEW: collect rev nums for member-card holders (1 pass, tiny logs)
+  const memberCardRevNums = [];
+  for (let i = 0; i < fullItems.length; i++) {
+    const it = fullItems[i];
+    if (
+      it?.ZH_CUSTOMERS_MEMBER_CARDNO != null &&
+      it.ZH_CUSTOMERS_MEMBER_CARDNO !== ""
+    ) {
+      const rev = Number(it.THIRDPARTYREVNUM);
+      if (Number.isFinite(rev)) memberCardRevNums.push(rev);
+    }
+  }
+  if (process.env.DEBUG === "1") {
+    console.log(`[MEMBER CARD] count=${memberCardRevNums.length}`);
+  }
+
+  let affiliatesCount = 0;
+  if (memberCardRevNums.length) {
+    // compute once, O(n) and fastest for JS engines
+    let minRev = memberCardRevNums[0];
+    for (let i = 1; i < memberCardRevNums.length; i++) {
+      const v = memberCardRevNums[i];
+      if (v < minRev) minRev = v;
+    }
+
+    try {
+      const affRes = await fetchAffiliatesSince(api, minRev);
+      if (affRes?.status >= 200 && affRes.status < 300) {
+        const affItems = Array.isArray(affRes.data?.Items)
+          ? affRes.data.Items
+          : [];
+        affiliatesCount = affItems.length;
+        if (process.env.DEBUG === "1") {
+          console.log(
+            `[AFFILIATES] minRev=${minRev} -> items=${affiliatesCount}`
+          );
+        }
+        // Optional: do something with affItems (e.g., map or upsert)
+      } else {
+        // keep logs short unless debugging
+        if (process.env.DEBUG === "1") {
+          console.warn(`[AFFILIATES] HTTP ${affRes?.status}`, affRes?.data);
+        } else {
+          console.warn(`[AFFILIATES] HTTP ${affRes?.status || "??"}`);
+        }
+      }
+    } catch (err) {
+      // network or unexpected
+      console.error("[AFFILIATES] fetch error:", err?.message || String(err));
+    }
+  } else if (process.env.DEBUG === "1") {
+    console.log(
+      "[MEMBER CARD] No member-card accounts in this batch; skipping affiliates fetch."
+    );
   }
 
   const devLimit =
@@ -146,6 +205,7 @@ async function runJobOnce() {
     processed: items.length,
     success: up.success,
     failed: up.failed,
+    affiliatesFetched: affiliatesCount,
   };
 }
 
