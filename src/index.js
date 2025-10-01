@@ -59,7 +59,7 @@ async function runJobOnce() {
     res = await fetchGalaxyData(
       api,
       "/api/glx/views/Customer/custom/zh_Customers_fin",
-      maxZohoRev 
+      maxZohoRev
     );
   } catch (err) {
     // ⚡️ FIX 1: Log the error object directly here to capture network issues (timeouts, SSL errors)
@@ -81,7 +81,7 @@ async function runJobOnce() {
       res = await fetchGalaxyData(
         api,
         "/api/glx/views/Customer/custom/zh_Customers_fin",
-        maxZohoRev 
+        maxZohoRev
       );
     } catch (err) {
       // ⚡️ FIX 2: Log re-authentication fetch failure
