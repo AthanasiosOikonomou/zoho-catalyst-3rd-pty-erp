@@ -76,8 +76,8 @@ function mapGalaxyToZohoAccount(gx) {
   };
 }
 
-// NOTE: Using 100 as the Zoho batch size limit. Can be increased up to 200 for faster processing.
-const BATCH_SIZE = 100;
+// NOTE: Using 200 as the Zoho batch size limit. Can be increased up to 200 for faster processing.
+const BATCH_SIZE = 200;
 // Utility to split arrays into chunks for batch processing.
 const chunk = (arr, n) =>
   Array.from({ length: Math.ceil(arr.length / n) }, (_, i) =>
