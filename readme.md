@@ -150,7 +150,3 @@ npm start
 ---
 
 For any questions, issues, or proposed architectural changes, please contact the repository owner: Sakis Oikonomou (ath.oikonomou@hotmail.com).
-
-```eof
-
-```
