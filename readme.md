@@ -132,7 +132,7 @@ A robust solution for integrating Zoho CRM with third-party ERP systems via Zoho
 ### Installation
 
 ```bash
-git clone https://github.com/your-org/zoho-catalyst-3rd-pty-erp.git
+git clone https://github.com/AthanasiosOikonomou/zoho-catalyst-3rd-pty-erp.git
 cd zoho-catalyst-3rd-pty-erp
 npm install
 ```
