@@ -4,6 +4,7 @@
     "CATEGDISCOUNT",
     "CNTRCODE",
     "COMPTITLE",
+    "COQL",
     "CUSTCODE",
     "EPAGG",
     "MAXBALANCE",
@@ -20,6 +21,7 @@
     "TRDSPHONE",
     "TRDSSTREET",
     "TURVOVER",
+    "Upserted",
     "upserting"
   ]
 }
