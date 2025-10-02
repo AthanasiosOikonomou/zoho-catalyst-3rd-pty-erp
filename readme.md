@@ -1,6 +1,6 @@
-# 📦 Galaxy ERP to Zoho CRM Synchronization Job
+# Galaxy ERP to Zoho CRM Synchronization via Zoho Catalyst
 
-## Project: `fetchAccountsContacts` (Zoho Catalyst Function)
+## Project
 
 | Metric        | Value                                         | Status           |
 | :------------ | :-------------------------------------------- | :--------------- |
