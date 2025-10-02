@@ -1,21 +1,124 @@
 /**
- * Catalyst Job Entry Point (affiliates per-customer, DEV_LIMIT respected)
+ * Catalyst Job Entry Point
+ * Linking Strategy: Affiliates are linked to Customers if they share the same Rev_Number.
+ * CRITICAL FIX: The minRev for fetching affiliates and the RevNum Set for filtering are
+ * derived ONLY from customers that have a ZH_CUSTOMERS_MEMBER_CARDNO (Card No),
+ * based on the assumption that only cardholders have affiliate relationships.
  */
 
 const cfg = require("./config");
 const { authenticate } = require("./auth/auth.js");
 const { createApiClient } = require("./api/apiClient");
-const { fetchGalaxyData } = require("./utils/fetchDataGlx.js");
+const { fetchGalaxyData } = require("./accounts/fetchAccountsZoho.js");
 const SessionStore = require("./utils/sessionStore");
 const {
   upsertAccounts,
   getMaxZohoRevNumber,
 } = require("./accounts/pushAccountsZoho.js");
-const {
-  fetchAffiliatesForCustomers,
-} = require("./accounts/fetchAffiliates.js");
+const { fetchAffiliatesSince } = require("./accounts/fetchAffiliates.js");
 const { upsertAffiliates } = require("./accounts/pushAffiliatesZoho.js");
 
+// -------- helpers --------
+function parseSinceRevOverride(maxZohoRev) {
+  if (String(process.env.FETCH_ALL || "").trim() === "1") return 0;
+  const raw = process.env.FETCH_SINCE_REV;
+  if (raw !== undefined) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) return n;
+    console.warn(
+      `[STATE] Ignoring invalid FETCH_SINCE_REV="${raw}". Using watermark ${maxZohoRev}.`
+    );
+  }
+  return maxZohoRev;
+}
+
+function computeDevLimit() {
+  const rawUpper = process.env.DEV_LIMIT;
+  const rawLower = process.env.dev_limit;
+  const rawMixed = process.env.Dev_Limit;
+
+  const candidates = [rawUpper, rawLower, rawMixed].filter(
+    (v) => v !== undefined
+  );
+  for (const v of candidates) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) {
+      console.log(
+        `[DEV] ENV DEV_LIMIT=${rawUpper ?? ""} dev_limit=${
+          rawLower ?? ""
+        } Dev_Limit=${rawMixed ?? ""} DEV_ONE_ITEM=${
+          process.env.DEV_ONE_ITEM ?? ""
+        } → using devLimit=${n}`
+      );
+      return n;
+    }
+  }
+  const one = process.env.DEV_ONE_ITEM === "1" ? 1 : 0;
+  console.log(
+    `[DEV] ENV DEV_LIMIT=${rawUpper ?? ""} dev_limit=${
+      rawLower ?? ""
+    } Dev_Limit=${rawMixed ?? ""} DEV_ONE_ITEM=${
+      process.env.DEV_ONE_ITEM ?? ""
+    } → using devLimit=${one}`
+  );
+  return one;
+}
+
+function upper(s) {
+  return String(s || "").toUpperCase();
+}
+
+// NEW FUNCTION: Map Affiliates by their AFFILIATES_REVNUM
+function buildAffiliateMaps(allAffRows) {
+  const affRevToAffTrader = new Map(); // AFFILIATES_REVNUM -> { affTraderId, rev }
+  const byAffTrader = new Map(); // affiliate Trader_ID -> chosen row (for upsert)
+
+  for (const row of allAffRows || []) {
+    const affRev = Number(row?.AFFILIATES_REVNUM) || 0;
+    const affTrader = upper(row?.AFFILIATES_TRDRID || "");
+    if (!affRev || !affTrader) continue;
+
+    // 1. Group by Affiliate Rev Number (for Customer linking):
+    // Choose the LATEST affiliate (by its own AFFILIATES_REVNUM) for a given AFFILIATES_REVNUM group.
+    const prevAffRev = affRevToAffTrader.get(affRev);
+    if (!prevAffRev || affRev > (prevAffRev.rev || 0)) {
+      affRevToAffTrader.set(affRev, { affTraderId: affTrader, rev: affRev });
+    }
+
+    // 2. Deduplicate for Upserting:
+    // Deduplicate affiliates by their Trader_ID (as before) to prepare for upsert.
+    const prevAff = byAffTrader.get(affTrader);
+    if (!prevAff || affRev > (Number(prevAff?.AFFILIATES_REVNUM) || 0)) {
+      byAffTrader.set(affTrader, row);
+    }
+  }
+
+  console.log(
+    `[AFFILIATES] Built RevNum→affiliate map: ${affRevToAffTrader.size} entries.`
+  );
+  const uniqueAffRows = Array.from(byAffTrader.values());
+  console.log(
+    `[AFFILIATES] Unique affiliate rows (before batch filter): ${uniqueAffRows.length}`
+  );
+
+  if (process.env.DEBUG === "1") {
+    const sampleRevNum = Array.from(affRevToAffTrader.entries()).slice(0, 5);
+    const sampleAff = uniqueAffRows.slice(0, 5).map((r) => ({
+      AFFILIATES_TRDRID: r.AFFILIATES_TRDRID,
+      AFF_NAME: r.AFF_NAME,
+      AFFILIATES_REVNUM: r.AFFILIATES_REVNUM,
+    }));
+    console.log("[AFFILIATES] Sample RevNum→affiliate (link):", sampleRevNum);
+    console.log(
+      "[AFFILIATES] Sample unique affiliates (before filter):",
+      sampleAff
+    );
+  }
+
+  return { affRevToAffTrader, uniqueAffRows };
+}
+
+// -------- main run --------
 async function runJobOnce() {
   console.log("[JOB] Start", new Date().toISOString());
 
@@ -43,13 +146,21 @@ async function runJobOnce() {
     `[STATE] Max Zoho Rev_Number (COQL source of truth): ${maxZohoRev}`
   );
 
-  // 2) Fetch Galaxy customers above watermark
+  // 2) Backfill override (FETCH_ALL / FETCH_SINCE_REV)
+  const sinceRev = parseSinceRevOverride(maxZohoRev);
+  if (sinceRev !== maxZohoRev) {
+    console.log(
+      `[STATE] Overriding watermark: sinceRev=${sinceRev} (was ${maxZohoRev})`
+    );
+  }
+
+  // 3) Fetch Galaxy customers above sinceRev
   let res;
   try {
     res = await fetchGalaxyData(
       api,
       "/api/glx/views/Customer/custom/zh_Customers_fin",
-      maxZohoRev
+      sinceRev
     );
   } catch (err) {
     console.error(
@@ -71,7 +182,7 @@ async function runJobOnce() {
       res = await fetchGalaxyData(
         api,
         "/api/glx/views/Customer/custom/zh_Customers_fin",
-        maxZohoRev
+        sinceRev
       );
     } catch (err) {
       console.error(
@@ -110,9 +221,8 @@ async function runJobOnce() {
   const fullItems = Array.isArray(res.data?.Items) ? res.data.Items : [];
   console.log(`[CUSTOMERS] Received ${fullItems.length} item(s).`);
 
-  // 3) DEV slicing must happen BEFORE any affiliates logic
-  const devLimit =
-    process.env.DEV_ONE_ITEM === "1" ? 1 : Number(process.env.DEV_LIMIT || 0);
+  // 4) DEV slicing
+  const devLimit = computeDevLimit();
   const items = devLimit > 0 ? fullItems.slice(0, devLimit) : fullItems;
   console.log(`[DEV] Using ${items.length} item(s) after DEV_LIMIT slicing.`);
 
@@ -128,126 +238,124 @@ async function runJobOnce() {
     };
   }
 
-  // 4) From *sliced* customers, find those with member cards
-  const customersWithMemberCard = items
-    .filter(
-      (it) =>
-        it?.ZH_CUSTOMERS_MEMBER_CARDNO != null &&
-        it.ZH_CUSTOMERS_MEMBER_CARDNO !== ""
-    )
-    .map((it) => String(it.TRDRID || "").toUpperCase())
-    .filter(Boolean);
+  // CRITICAL: Collect THIRDPARTYREVNUMs and full data ONLY from customers with a CardNo
+  const cardHolderRevNums = [];
+  const cardHolderCustomerSamples = [];
+  for (const it of items) {
+    if (
+      it?.ZH_CUSTOMERS_MEMBER_CARDNO != null &&
+      it.ZH_CUSTOMERS_MEMBER_CARDNO !== ""
+    ) {
+      const rev = Number(it.THIRDPARTYREVNUM);
+      if (Number.isFinite(rev) && rev > 0) {
+        cardHolderRevNums.push(rev);
+        cardHolderCustomerSamples.push(it); // Store the full object for diagnostic logging
+      }
+    }
+  }
 
   console.log(
-    `[MEMBER CARD] Customers with card in this batch: ${
-      customersWithMemberCard.length
-    }${
-      customersWithMemberCard.length
-        ? " → " + customersWithMemberCard.slice(0, 5).join(", ")
-        : ""
-    }`
+    `[REV NUM] In sliced batch: ${cardHolderRevNums.length} item(s) with CardNo and RevNum.`
   );
 
-  // 5) Fetch affiliates per-customer (limited concurrency)
-  let affiliatesFetched = 0;
-  let affiliatesUpserted = 0;
-  let affiliateIdByCustomerTrdrId = new Map();
-
-  if (customersWithMemberCard.length) {
-    const { items: affItems, stats } = await fetchAffiliatesForCustomers(
-      api,
-      customersWithMemberCard,
-      {
-        timeoutMs: 20000,
-        retry: 1,
-        concurrency: 3,
-      }
-    );
-    affiliatesFetched = affItems.length;
+  // *** DIAGNOSTIC LOGGING: Dump the data used for linking ***
+  if (cardHolderCustomerSamples.length > 0) {
+    // Log the full object(s) of the customer(s) the job is trying to link
     console.log(
-      `[AFFILIATES] Fetch aggregated: for ${stats.totalCustomers} customers → succeeded=${stats.succeeded}, failed=${stats.failed}, totalItems=${affiliatesFetched}`
-    );
-
-    // Build customer→affiliate (keep latest by REVNUM)
-    const custToAffTrader = new Map();
-    for (const row of affItems) {
-      const custId = String(
-        row?.AFFILIATES_CUST_TRDRID || row?.TRDRID || ""
-      ).toUpperCase();
-      const affTrader = String(row?.AFFILIATES_TRDRID || "").toUpperCase();
-      const rev = Number(row?.AFFILIATES_REVNUM) || 0;
-      if (!custId || !affTrader) continue;
-
-      const prev = custToAffTrader.get(custId);
-      if (!prev || rev > (prev.rev || 0)) {
-        custToAffTrader.set(custId, { affTraderId: affTrader, rev });
-      }
-    }
-    console.log(
-      `[AFFILIATES] Built customer→affiliate map: ${custToAffTrader.size} entries.`
-    );
-    if (process.env.DEBUG === "1") {
-      const sample = Array.from(custToAffTrader.entries()).slice(0, 5);
-      console.log("[AFFILIATES] Sample customer→affiliate:", sample);
-    }
-
-    // Deduplicate affiliates by Trader_ID (keep latest by REVNUM)
-    const byAffTrader = new Map();
-    for (const row of affItems) {
-      const affTrader = String(row?.AFFILIATES_TRDRID || "").toUpperCase();
-      if (!affTrader) continue;
-      const rev = Number(row?.AFFILIATES_REVNUM) || 0;
-      const prev = byAffTrader.get(affTrader);
-      if (!prev || rev > (prev.AFFILIATES_REVNUM || 0)) {
-        byAffTrader.set(affTrader, row);
-      }
-    }
-    const uniqueAffRows = Array.from(byAffTrader.values());
-    console.log(
-      `[AFFILIATES] Unique affiliate rows to upsert: ${uniqueAffRows.length}`
-    );
-
-    // 6) Upsert affiliates first
-    const affUp = await upsertAffiliates(uniqueAffRows, {
-      debug: process.env.DEBUG === "1",
-    });
-    affiliatesUpserted = affUp.success;
-    const idByTraderId = affUp.idByTraderId || new Map();
-
-    // Build final map: customer TRDRID -> affiliate Zoho ID
-    affiliateIdByCustomerTrdrId = new Map();
-    for (const [custId, { affTraderId }] of custToAffTrader.entries()) {
-      const zid = idByTraderId.get(affTraderId);
-      if (zid) affiliateIdByCustomerTrdrId.set(custId, zid);
-    }
-    console.log(
-      `[AFFILIATES] Ready for linking: customer→affiliate ZohoID map size: ${affiliateIdByCustomerTrdrId.size}`
-    );
-    if (process.env.DEBUG === "1") {
-      const sample = Array.from(affiliateIdByCustomerTrdrId.entries()).slice(
-        0,
-        5
-      );
-      console.log(
-        "[AFFILIATES] Sample customer TRDRID → affiliate ZohoID:",
-        sample
-      );
-    }
-  } else {
-    console.log(
-      "[AFFILIATES] No member-card customers in this batch; skip affiliates flow."
+      "[DIAGNOSTIC] CARD-HOLDER CUSTOMER DATA DUMP (CHECK FOR LINKING ID):",
+      cardHolderCustomerSamples.slice(0, 5)
     );
   }
 
-  // 7) Upsert customers with Affiliate_To lookup when available
+  // *** NEW STEP: Create a Set of Rev_Numbers from the Card-Holding customers (for filtering) ***
+  const batchRevNumSet = new Set(cardHolderRevNums);
+
+  // 5) Affiliates: single call with minRev from card-holding customers
+  let affiliatesFetched = 0;
+  let affiliatesUpserted = 0;
+  // Map key is the Rev_Number (the customer's THIRDPARTYREVNUM)
+  let affiliateIdByCustomerRevNum = new Map();
+
+  let minRev = sinceRev; // Start with the global watermark/override
+  if (cardHolderRevNums.length) {
+    // Determine minRev from the current batch's card-holding customers
+    const minRevInBatch = Math.min(...cardHolderRevNums);
+    // Use the minimum of the current batch's minRev and the global watermark
+    minRev =
+      sinceRev === 0 || minRevInBatch < sinceRev ? minRevInBatch : sinceRev;
+  }
+
+  console.log(`[AFFILIATES] Determined affiliate fetch minRev: ${minRev}.`);
+
+  // ---- Single attempt: minRev determined by batch
+  const affRes = await fetchAffiliatesSince(api, minRev, {
+    timeoutMs: 20000,
+    retry: 1,
+  });
+  let allAff = [];
+  if (affRes?.status >= 200 && affRes.status < 300) {
+    allAff = Array.isArray(affRes.data?.Items) ? affRes.data.Items : [];
+    affiliatesFetched += allAff.length;
+    console.log(
+      `[AFFILIATES] minRev=${minRev} → fetched ${allAff.length} row(s).`
+    );
+  } else {
+    console.warn(
+      `[AFFILIATES] HTTP ${affRes?.status || "??"} on affiliate fetch.`
+    );
+  }
+
+  // Build maps (affRevToAffTrader is built from ALL fetched data)
+  const { affRevToAffTrader, uniqueAffRows } = buildAffiliateMaps(allAff);
+
+  // *** FILTER: Restrict unique affiliates to only those whose RevNum matches a CardHolder's RevNum in the batch ***
+  const relevantAffiliatesToUpsert = uniqueAffRows.filter((affRow) =>
+    batchRevNumSet.has(Number(affRow.AFFILIATES_REVNUM))
+  );
+
+  console.log(
+    `[AFFILIATES] Filtering unique affiliates from ${uniqueAffRows.length} to ${relevantAffiliatesToUpsert.length} based on batch RevNum match.`
+  );
+
+  // Upsert ONLY the filtered, relevant affiliates
+  const affUp = await upsertAffiliates(relevantAffiliatesToUpsert, {
+    debug: process.env.DEBUG === "1",
+  });
+  affiliatesUpserted = affUp.success;
+  const idByTraderId = affUp.idByTraderId || new Map();
+
+  // New Linking Step: RevNum -> Affiliate Zoho ID (Only map if the affiliate was successfully upserted)
+  affiliateIdByCustomerRevNum = new Map();
+  for (const [revNum, { affTraderId }] of affRevToAffTrader.entries()) {
+    // Only map if the affiliate was successfully upserted (i.e., exists in idByTraderId)
+    const zid = idByTraderId.get(affTraderId);
+    if (zid) affiliateIdByCustomerRevNum.set(revNum, zid);
+  }
+
+  console.log(
+    `[AFFILIATES] Ready for linking: Customer RevNum→affiliate ZohoID map size: ${affiliateIdByCustomerRevNum.size}`
+  );
+  if (process.env.DEBUG === "1") {
+    const sample = Array.from(affiliateIdByCustomerRevNum.entries()).slice(
+      0,
+      5
+    );
+    console.log(
+      "[AFFILIATES] Sample Customer RevNum → affiliate ZohoID:",
+      sample
+    );
+  }
+
+  // 6) Upsert customers with Affiliate_To lookup where available
   console.log(`[ZOHO] Calling upsert for ${items.length} item(s)...`);
   const up = await upsertAccounts(items, {
     debug: process.env.DEBUG === "1",
-    affiliateIdByCustomerTrdrId,
+    // PASSING THE CORRECT REV NUMBER MAP
+    affiliateIdByCustomerRevNum,
+    // affiliateFieldApiName: "Affiliate_To__c"
   });
   console.log(`[ZOHO] Upsert → success: ${up.success}, failed: ${up.failed}`);
 
-  // Return summary
   return {
     ok: true,
     processed: items.length,
@@ -255,7 +363,7 @@ async function runJobOnce() {
     failed: up.failed,
     affiliatesFetched,
     affiliatesUpserted,
-    linkedCustomers: affiliateIdByCustomerTrdrId.size,
+    linkedCustomers: affiliateIdByCustomerRevNum.size,
   };
 }
 

@@ -1,5 +1,5 @@
 /**
- * Zoho Accounts Integration (Upsert-only, with Affiliate_To)
+ * Zoho Accounts Integration (Upsert-only, with Affiliate_To, enhanced logging)
  */
 
 const axios = require("axios");
@@ -8,7 +8,8 @@ const { getZohoAccessToken, getZohoBaseUrl } = require("../auth/zohoAuth");
 const cfg = require("../config");
 
 const keepAliveAgent = new https.Agent({ keepAlive: true });
-const BATCH_SIZE = 200;
+// Many Zoho APIs cap at 100 records per call. Keep it safe.
+const BATCH_SIZE = 100;
 
 const normStr = (v) => (v == null ? undefined : String(v).trim());
 const normId = (v) => {
@@ -62,6 +63,7 @@ function mapGalaxyToZohoAccount(gx) {
     normStr(gx.TRDRCODE);
 
   const tinDigits = normDigits(gx.TIN);
+  const revNum = num(gx.THIRDPARTYREVNUM);
 
   return {
     Trader_ID: normId(gx.TRDRID),
@@ -82,11 +84,16 @@ function mapGalaxyToZohoAccount(gx) {
     Turnover_YTD: num(gx.TURNOVER_YTD),
     Turnover_LTD: num(gx.TURNOVER_LTD),
     Turnover_LY: num(gx.TURVOVER_LY),
-    Rev_Number: num(gx.THIRDPARTYREVNUM),
+    // Use the calculated revNum value
+    Rev_Number: revNum,
     SALESNAME: normStr(gx.SALESNAME),
+
+    // temp debug helpers (removed before send)
     __GX_TRDRID: normId(gx.TRDRID),
     __GX_TIN: tinDigits,
     __GX_NAME: name,
+    // NEW: Debug helper for the Rev_Number used for linking
+    __GX_REVNUM: revNum,
   };
 }
 
@@ -127,13 +134,20 @@ async function getMaxZohoRevNumber() {
 }
 
 /**
- * Upsert Accounts with optional Affiliate_To lookup (by Zoho ID).
+ * Upsert Accounts with optional Affiliate_To lookup (by Rev_Number).
+ * Enhanced logging: HTTP status, error tallies, and sample errors.
+ *
  * @param {Array<Object>} galaxyItems
- * @param {{ debug?: boolean, affiliateIdByCustomerTrdrId?: Map<string,string> }} options
+ * @param {{ debug?: boolean, affiliateIdByCustomerRevNum?: Map<number,string>, affiliateFieldApiName?: string }} options
  */
 async function upsertAccounts(
   galaxyItems,
-  { debug, affiliateIdByCustomerTrdrId } = {}
+  // Changed expected map to affiliateIdByCustomerRevNum
+  {
+    debug,
+    affiliateIdByCustomerRevNum,
+    affiliateFieldApiName = "Affiliate_To",
+  } = {}
 ) {
   const totalIn = Array.isArray(galaxyItems) ? galaxyItems.length : 0;
   console.log(`[ZOHO] upsertAccounts() received ${totalIn} galaxy item(s).`);
@@ -167,24 +181,26 @@ async function upsertAccounts(
       continue;
     }
 
-    // Attach Affiliate_To lookup if we have it for this customer TRDRID
-    if (affiliateIdByCustomerTrdrId && m.Trader_ID) {
-      const affZohoId = affiliateIdByCustomerTrdrId.get(m.Trader_ID);
+    // Attach Affiliate lookup if available (NOW LINKING BY Rev_Number)
+    if (affiliateIdByCustomerRevNum && m.Rev_Number) {
+      const affZohoId = affiliateIdByCustomerRevNum.get(m.Rev_Number);
       if (affZohoId) {
-        m.Affiliate_To = { id: affZohoId };
+        m[affiliateFieldApiName] = { id: affZohoId };
         affiliateAttachedCount++;
         if (affiliateAttachSamples.length < 5) {
           affiliateAttachSamples.push({
-            Trader_ID: m.Trader_ID,
-            Affiliate_To: affZohoId,
+            Rev_Number: m.Rev_Number,
+            [affiliateFieldApiName]: affZohoId,
           });
         }
       }
     }
 
+    // Remove internal debug fields
     delete m.__GX_TRDRID;
     delete m.__GX_TIN;
     delete m.__GX_NAME;
+    delete m.__GX_REVNUM; // NEW: remove Rev_Number debug field
 
     mapped.push(m);
   }
@@ -216,32 +232,36 @@ async function upsertAccounts(
     failed = 0;
   const details = [];
 
-  const results = await Promise.all(
-    groups.map((group) =>
-      zohoApi(
-        "POST",
-        "/crm/v8/Accounts/upsert",
-        { data: group },
-        { duplicate_check_fields: "Trader_ID" }
-      )
-    )
-  );
-
-  for (let gi = 0; gi < results.length; gi++) {
-    const res = results[gi];
+  for (let gi = 0; gi < groups.length; gi++) {
     const group = groups[gi];
+    const res = await zohoApi(
+      "POST",
+      "/crm/v8/Accounts/upsert",
+      { data: group },
+      { duplicate_check_fields: "Trader_ID" }
+    );
 
-    if (res.status !== 200 || !Array.isArray(res.data?.data)) {
+    const httpStatus = res.status;
+    const body = res.data;
+
+    if (httpStatus !== 200 || !Array.isArray(body?.data)) {
       failed += group.length;
-      details.push({
-        status: "http_error",
-        httpStatus: res.status,
-        payload: res.data,
-      });
+      console.warn(
+        `[ZOHO] Upsert batch ${gi + 1}/${
+          groups.length
+        } HTTP ${httpStatus}. Body:`,
+        body
+      );
+      details.push({ status: "http_error", httpStatus, payload: body });
       continue;
     }
-    for (let i = 0; i < res.data.data.length; i++) {
-      const row = res.data.data[i];
+
+    // Tally error codes, collect sample errors
+    const errorTally = new Map();
+    const sampleErrors = [];
+
+    for (let i = 0; i < body.data.length; i++) {
+      const row = body.data[i];
       if (row.status === "success") {
         success += 1;
         details.push({
@@ -251,17 +271,39 @@ async function upsertAccounts(
         });
       } else {
         failed += 1;
-        details.push({
-          status: "error",
-          code: row.code,
-          message: row.message,
-          details: row.details,
-        });
+        const code = row.code || "UNKNOWN";
+        const msg = row.message || "";
+        const d = row.details || null;
+        details.push({ status: "error", code, message: msg, details: d });
+
+        errorTally.set(code, (errorTally.get(code) || 0) + 1);
+        if (sampleErrors.length < 5) {
+          sampleErrors.push({ code, message: msg, details: d });
+        }
       }
+    }
+
+    // Print a compact summary for this batch
+    if (errorTally.size) {
+      console.warn(
+        `[ZOHO] Batch ${gi + 1}/${groups.length} — errors by code:`,
+        Object.fromEntries(errorTally.entries())
+      );
+      console.warn(
+        `[ZOHO] Batch ${gi + 1}/${groups.length} — sample errors:`,
+        sampleErrors
+      );
+    } else {
+      console.log(
+        `[ZOHO] Batch ${gi + 1}/${groups.length} — all ${
+          group.length
+        } records succeeded.`
+      );
     }
   }
 
   const out = { success, failed, details };
+  // Changed debug key to reflect the new map key
   if (debug)
     out.debug = { dropped, affiliateAttachedCount, affiliateAttachSamples };
   return out;

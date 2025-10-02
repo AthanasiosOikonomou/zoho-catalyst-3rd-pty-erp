@@ -1,9 +1,8 @@
 /**
- * Upsert Affiliates into Zoho Accounts
- * ------------------------------------
+ * Upsert Affiliates into Zoho Accounts (enhanced logging)
  * Trader_ID = AFFILIATES_TRDRID
  * Account_Name = AFF_NAME
- * Account_AFM = AFF_TIN
+ * Account_AFM = AFF_TIN        // included to help with mandatory fields, if any
  * Rev_Number = AFFILIATES_REVNUM
  */
 
@@ -13,7 +12,7 @@ const { getZohoAccessToken, getZohoBaseUrl } = require("../auth/zohoAuth");
 const cfg = require("../config");
 
 const keepAliveAgent = new https.Agent({ keepAlive: true });
-const BATCH_SIZE = 200;
+const BATCH_SIZE = 100;
 
 const normStr = (v) => (v == null ? undefined : String(v).trim());
 const normId = (v) => {
@@ -58,6 +57,7 @@ function mapAffToZohoAccount(row) {
 
 /**
  * Upsert affiliates and return Zoho ID map: Trader_ID -> ZohoID
+ * Enhanced logging: HTTP status, error tallies, and sample errors.
  */
 async function upsertAffiliates(affRows, { debug } = {}) {
   const mappedAll = (Array.isArray(affRows) ? affRows : []).map(
@@ -79,13 +79,11 @@ async function upsertAffiliates(affRows, { debug } = {}) {
   );
 
   if (debug) {
-    const sample = mapped
-      .slice(0, 5)
-      .map((x) => ({
-        Trader_ID: x.Trader_ID,
-        Account_Name: x.Account_Name,
-        Rev_Number: x.Rev_Number,
-      }));
+    const sample = mapped.slice(0, 5).map((x) => ({
+      Trader_ID: x.Trader_ID,
+      Account_Name: x.Account_Name,
+      Rev_Number: x.Rev_Number,
+    }));
     console.log("[AFF->ZOHO] Sample mapped:", sample);
   }
 
@@ -102,33 +100,37 @@ async function upsertAffiliates(affRows, { debug } = {}) {
     (_, i) => mapped.slice(i * BATCH_SIZE, i * BATCH_SIZE + BATCH_SIZE)
   );
 
-  const results = await Promise.all(
-    groups.map((group) =>
-      zohoApi(
-        "POST",
-        "/crm/v8/Accounts/upsert",
-        { data: group },
-        { duplicate_check_fields: "Trader_ID" }
-      )
-    )
-  );
-
-  for (let gi = 0; gi < results.length; gi++) {
-    const res = results[gi];
+  for (let gi = 0; gi < groups.length; gi++) {
     const group = groups[gi];
+    const res = await zohoApi(
+      "POST",
+      "/crm/v8/Accounts/upsert",
+      { data: group },
+      { duplicate_check_fields: "Trader_ID" }
+    );
 
-    if (res.status !== 200 || !Array.isArray(res.data?.data)) {
+    const httpStatus = res.status;
+    const body = res.data;
+
+    if (httpStatus !== 200 || !Array.isArray(body?.data)) {
       failed += group.length;
-      details.push({
-        status: "http_error",
-        httpStatus: res.status,
-        payload: res.data,
-      });
+      console.warn(
+        `[AFF->ZOHO] Upsert batch ${gi + 1}/${
+          groups.length
+        } HTTP ${httpStatus}. Body:`,
+        body
+      );
+      details.push({ status: "http_error", httpStatus, payload: body });
       continue;
     }
-    for (let i = 0; i < res.data.data.length; i++) {
-      const rowRes = res.data.data[i];
+
+    const errorTally = new Map();
+    const sampleErrors = [];
+
+    for (let i = 0; i < body.data.length; i++) {
+      const rowRes = body.data[i];
       const sent = group[i];
+
       if (rowRes.status === "success") {
         success += 1;
         const zid = rowRes.details?.id;
@@ -141,14 +143,39 @@ async function upsertAffiliates(affRows, { debug } = {}) {
         });
       } else {
         failed += 1;
+        const code = rowRes.code || "UNKNOWN";
+        const msg = rowRes.message || "";
+        const d = rowRes.details || null;
         details.push({
           status: "error",
-          code: rowRes.code,
-          message: rowRes.message,
-          details: rowRes.details,
+          code,
+          message: msg,
+          details: d,
           trader: sent?.Trader_ID,
         });
+
+        errorTally.set(code, (errorTally.get(code) || 0) + 1);
+        if (sampleErrors.length < 5) {
+          sampleErrors.push({ code, message: msg, details: d });
+        }
       }
+    }
+
+    if (errorTally.size) {
+      console.warn(
+        `[AFF->ZOHO] Batch ${gi + 1}/${groups.length} — errors by code:`,
+        Object.fromEntries(errorTally.entries())
+      );
+      console.warn(
+        `[AFF->ZOHO] Batch ${gi + 1}/${groups.length} — sample errors:`,
+        sampleErrors
+      );
+    } else {
+      console.log(
+        `[AFF->ZOHO] Batch ${gi + 1}/${groups.length} — all ${
+          group.length
+        } records succeeded.`
+      );
     }
   }
 
