@@ -1,18 +1,23 @@
+// src/auth/auth.js
+
 /**
  * Authentication Module
  * ---------------------
- * Handles authentication against the backend API, including session management
- * via cookies and error handling for failed authentication attempts.
+ * Handles authentication against Galaxy API.
+ * Features:
+ *  - Session management via cookies
+ *  - Extracts ss-pid for session continuity
+ *  - Throws errors for failed authentication
  */
 
 const axios = require("axios");
 const cfg = require("../config");
 
 /**
- * Extracts the value of a specific cookie from the 'Set-Cookie' headers.
- * @param {string[]|string} setCookieHeaders - The 'Set-Cookie' header(s) from the response.
- * @param {string} name - The name of the cookie to extract.
- * @returns {string|null} The cookie value, or null if not found.
+ * Extract value from Set-Cookie headers
+ * @param {string[]|string} setCookieHeaders
+ * @param {string} name
+ * @returns string|null
  */
 function extractCookieValue(setCookieHeaders, name) {
   if (!setCookieHeaders) return null;
@@ -30,9 +35,7 @@ function extractCookieValue(setCookieHeaders, name) {
 }
 
 /**
- * Constructs the authentication endpoint URL using the base URL from config.
- * @returns {string} The full authentication URL.
- * @throws Will throw if the base URL is invalid.
+ * Build authentication URL
  */
 function buildAuthUrl() {
   try {
@@ -44,16 +47,14 @@ function buildAuthUrl() {
 }
 
 /**
- * Authenticates with the backend API using credentials from config.
- * Optionally uses an existing ss-pid cookie for session continuity.
- * @param {string|null} currentSsPid - Existing ss-pid cookie value, if available.
- * @returns {Promise<{sessionId: string, ssPid: string|null}>} Auth result with session ID and ss-pid.
- * @throws Will throw an error if authentication fails.
+ * Authenticate to Galaxy API
+ * @param {string|null} currentSsPid
+ * @returns {Promise<{sessionId:string, ssPid:string|null}>}
  */
 async function authenticate(currentSsPid = null) {
   const url = buildAuthUrl();
   const base = new URL(cfg.baseURL);
-  // NOTE: Removed keepAlive agents for quick job termination
+
   const res = await axios.get(url, {
     params: { username: cfg.username, password: cfg.password },
     headers: {
@@ -74,6 +75,7 @@ async function authenticate(currentSsPid = null) {
       throw new Error("Auth succeeded but no SessionId in payload.");
     return { sessionId, ssPid: maybeNewPid || currentSsPid || null };
   }
+
   const message =
     res.data?.ResponseStatus?.Message || `HTTP ${res.status} ${res.statusText}`;
   const err = new Error(`Auth failed: ${message}`);

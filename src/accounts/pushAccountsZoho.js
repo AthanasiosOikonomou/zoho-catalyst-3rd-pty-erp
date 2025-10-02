@@ -1,5 +1,17 @@
+// src/accounts/pushAccountsZoho.js
+
 /**
- * Zoho Accounts Integration (Upsert-only, with Affiliate_To, enhanced logging)
+ * Zoho Accounts Integration
+ * --------------------------
+ * Provides utilities to:
+ *  - Normalize Galaxy records into Zoho Accounts format
+ *  - Retrieve the latest revision watermark from Zoho
+ *  - Upsert Accounts into Zoho CRM (with optional Affiliate_To linking)
+ *
+ * Notes:
+ *  - Upsert only (no delete)
+ *  - Supports batch processing with logging and error aggregation
+ *  - Affiliate linking is based on Rev_Number if mapping is provided
  */
 
 const axios = require("axios");
@@ -10,6 +22,12 @@ const cfg = require("../config");
 const keepAliveAgent = new https.Agent({ keepAlive: true });
 // Many Zoho APIs cap at 100 records per call. Keep it safe.
 const BATCH_SIZE = 100;
+
+// Normalization helpers — sanitize and standardize Galaxy values before mapping
+// - Strings: trim, uppercase, or undefined
+// - Digits: strip non-numeric
+// - Numbers: parse or undefined
+// - Phone: strict validation (E.164-like, 8–15 digits)
 
 const normStr = (v) => (v == null ? undefined : String(v).trim());
 const normId = (v) => {
@@ -34,6 +52,18 @@ const normPhone = (v) => {
   return s;
 };
 
+/**
+ * Generic Zoho API request wrapper.
+ * Handles token injection, JSON headers, timeout, compression, and keep-alive.
+ * Returns raw Axios response without throwing on non-200 status.
+ *
+ * @param {"GET"|"POST"|"PUT"|"DELETE"} method
+ * @param {string} path - API endpoint path (relative to base URL).
+ * @param {Object|null} body - Request payload (if any).
+ * @param {Object} params - Query string params.
+ * @returns {Promise<AxiosResponse>}
+ */
+
 async function zohoApi(method, path, body, params) {
   const token = await getZohoAccessToken();
   const base = getZohoBaseUrl();
@@ -54,6 +84,20 @@ async function zohoApi(method, path, body, params) {
     httpsAgent: keepAliveAgent,
   });
 }
+
+/**
+ * Map a single Galaxy customer record into Zoho Accounts format.
+ * Applies normalization to ensure consistent IDs, numbers, and phone formats.
+ *
+ * - Uses Trader_ID as the unique external key
+ * - Attempts multiple fallbacks for Account_Name
+ * - Includes financial and turnover fields if available
+ * - Attaches Rev_Number for watermark tracking
+ * - Temporary debug fields (__GX_*) are added for diagnostics and later stripped
+ *
+ * @param {Object} gx - Galaxy customer record
+ * @returns {Object} Normalized Zoho Account record
+ */
 
 function mapGalaxyToZohoAccount(gx) {
   const name =
@@ -98,10 +142,23 @@ function mapGalaxyToZohoAccount(gx) {
 }
 
 /**
- * Efficient watermark for Galaxy.
+ * Fetch the highest Rev_Number currently stored in Zoho Accounts.
+ * Used as a watermark for incremental sync from Galaxy.
+ *
+ * @returns {Promise<number>} The latest Rev_Number, or 0 on error/empty.
  */
+
 async function getMaxZohoRevNumber() {
   try {
+    /**
+     * Fetch single record sorted by Rev_Number descending
+     * use v2 because v8 does not support sorting
+     * https://www.zoho.com/crm/developer/docs/api/v2/get-records.html
+     * sort_by: string, optional
+     * Specify the API name of the field based on which the records must be sorted. The default value is id. If you provide invalid values, default sorting will take
+     * Possible values: Field API names
+     * v3 up to v8 do not support sort_by by custom fields
+     */
     const res = await zohoApi("GET", "/crm/v2/Accounts", null, {
       fields: "Rev_Number",
       sort_by: "Rev_Number",
@@ -134,12 +191,21 @@ async function getMaxZohoRevNumber() {
 }
 
 /**
- * Upsert Accounts with optional Affiliate_To lookup (by Rev_Number).
- * Enhanced logging: HTTP status, error tallies, and sample errors.
+ * Upsert Galaxy records into Zoho Accounts.
  *
- * @param {Array<Object>} galaxyItems
- * @param {{ debug?: boolean, affiliateIdByCustomerRevNum?: Map<number,string>, affiliateFieldApiName?: string }} options
+ * - Groups records into batches of 100 (Zoho API limit)
+ * - Drops items missing mandatory fields (Trader_ID, Account_Name)
+ * - Optionally links Affiliate_To field if a Rev_Number → Zoho ID map is provided
+ * - Logs progress: batch results, error tallies, sample errors
+ *
+ * @param {Array<Object>} galaxyItems - Raw Galaxy records to process
+ * @param {Object} options
+ * @param {boolean} [options.debug] - Include debug info in return object
+ * @param {Map<number,string>} [options.affiliateIdByCustomerRevNum] - Map of Rev_Number → Affiliate Zoho ID
+ * @param {string} [options.affiliateFieldApiName="Affiliate_To"] - Field API name for affiliate link
+ * @returns {Promise<{ success:number, failed:number, details:Array, debug?:Object }>}
  */
+
 async function upsertAccounts(
   galaxyItems,
   // Changed expected map to affiliateIdByCustomerRevNum
@@ -161,7 +227,7 @@ async function upsertAccounts(
     const m = mapGalaxyToZohoAccount(gx);
     if (!m.Account_Name) {
       dropped++;
-      if (process.env.DEBUG === "1") {
+      if (IS_DEBUG) {
         console.warn("[ZOHO] Dropping item with no Account_Name", {
           Trader_ID: m.__GX_TRDRID,
           TIN: m.__GX_TIN,
@@ -172,7 +238,7 @@ async function upsertAccounts(
     }
     if (!m.Trader_ID) {
       dropped++;
-      if (process.env.DEBUG === "1") {
+      if (IS_DEBUG) {
         console.warn("[ZOHO] Dropping item with no Trader_ID", {
           Trader_ID: m.__GX_TRDRID,
           Name: m.__GX_NAME,
@@ -181,7 +247,8 @@ async function upsertAccounts(
       continue;
     }
 
-    // Attach Affiliate lookup if available (NOW LINKING BY Rev_Number)
+    // Attach Affiliate lookup if a matching Rev_Number is found
+
     if (affiliateIdByCustomerRevNum && m.Rev_Number) {
       const affZohoId = affiliateIdByCustomerRevNum.get(m.Rev_Number);
       if (affZohoId) {
@@ -196,7 +263,7 @@ async function upsertAccounts(
       }
     }
 
-    // Remove internal debug fields
+    // Clean up temp debug fields
     delete m.__GX_TRDRID;
     delete m.__GX_TIN;
     delete m.__GX_NAME;
@@ -256,7 +323,8 @@ async function upsertAccounts(
       continue;
     }
 
-    // Tally error codes, collect sample errors
+    // Aggregate errors by code and capture up to 5 samples for diagnostics
+
     const errorTally = new Map();
     const sampleErrors = [];
 

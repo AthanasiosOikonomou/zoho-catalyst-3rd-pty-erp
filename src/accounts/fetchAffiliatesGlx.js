@@ -1,16 +1,21 @@
-// src/accounts/fetchAffiliates.js
-const { buildRawFilter } = require("../utils/filters");
+// src/accounts/fetchAffiliatesGlx.js
 
 /**
- * Single Affiliates fetch using AFFILIATES_REVNUM >= minRev (inclusive).
- * - We keep it to one call as requested.
- * - Optional longer timeout & one retry to handle large result sets.
+ * Fetch affiliates from Galaxy where AFFILIATES_REVNUM >= minRev.
  *
- * @param {AxiosInstance} api - authenticated Galaxy axios instance
- * @param {number} minRev - minimum AFFILIATES_REVNUM (inclusive)
- * @param {{ timeoutMs?: number, retry?: number }} options
- * @returns {Promise<{ status:number, data:any }>}\
+ * - Supports optional custom timeout and retry attempts (with fixed backoff).
+ * - Always attempts the request at least once; on failure it retries up to `retry` times.
+ * - Throws if all attempts fail.
+ *
+ * @param {AxiosInstance} api - Authenticated Galaxy API client.
+ * @param {number} minRev - Minimum AFFILIATES_REVNUM (inclusive).
+ * @param {{ timeoutMs?: number, retry?: number }} [options]
+ *   - timeoutMs: Request timeout in milliseconds (default 20000).
+ *   - retry: Number of retry attempts after the initial request (default 1).
+ * @returns {Promise<AxiosResponse>} The successful Axios response.
+ * @throws {Error} If all attempts fail or input is invalid.
  */
+
 async function fetchAffiliatesSince(
   api,
   minRev,
@@ -32,7 +37,7 @@ async function fetchAffiliatesSince(
   let lastErr;
   for (let attempt = 0; attempt <= retry; attempt++) {
     try {
-      if (process.env.DEBUG === "1") {
+      if (IS_DEBUG) {
         console.log("[AFFILIATES] Request:", finalUrl);
       }
       const res = await api.get(finalUrl, { timeout: timeoutMs });

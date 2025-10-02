@@ -1,3 +1,25 @@
 {
-  "cSpell.words": ["CARDNO", "Nums", "THIRDPARTYREVNUM", "upserting"]
+  "cSpell.words": [
+    "CARDNO",
+    "CATEGDISCOUNT",
+    "CNTRCODE",
+    "COMPTITLE",
+    "CUSTCODE",
+    "EPAGG",
+    "MAXBALANCE",
+    "Nums",
+    "oauthtoken",
+    "Preconfigured",
+    "PREFDESCR",
+    "REVNUM",
+    "SALESNAME",
+    "THIRDPARTYREVNUM",
+    "TRDRCODE",
+    "TRDRID",
+    "TRDRNAME",
+    "TRDSPHONE",
+    "TRDSSTREET",
+    "TURVOVER",
+    "upserting"
+  ]
 }

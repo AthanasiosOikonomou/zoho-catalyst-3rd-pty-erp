@@ -1,8 +1,13 @@
+// src/config.js
+
 /**
  * Configuration Module
  * --------------------
- * Loads and validates environment variables for application settings,
- * including API credentials, session management, scheduling, and Zoho integration.
+ * Loads environment variables and validates essential config.
+ * Features:
+ *  - Base URL validation
+ *  - Credentials check
+ *  - Session file and Zoho config
  */
 
 function cleanUrl(s) {
@@ -17,9 +22,10 @@ const cfg = {
   username: process.env.AUTH_USERNAME,
   password: process.env.AUTH_PASSWORD,
   ssPid: process.env.SS_PID_COOKIE || null,
-  cronExpr: process.env.CRON || "* * * * *", // dev default: every minute
-  timeoutMs: Number(process.env.TIMEOUT_MS || 20000), // tighter default for faster fail
+  cronExpr: process.env.CRON || "* * * * *",
+  timeoutMs: Number(process.env.TIMEOUT_MS || 20000),
   sessionFile: process.env.SESSION_FILE || "./.session.json",
+  IS_DEBUG: process.env.DEBUG === "1",
   zoho: {
     clientId: process.env.ZOHO_CLIENT_ID,
     clientSecret: process.env.ZOHO_CLIENT_SECRET,
@@ -28,10 +34,9 @@ const cfg = {
   },
 };
 
+// Validate mandatory config
 if (!cfg.baseURL) {
-  throw new Error(
-    "Missing BASE_URL in .env (e.g., BASE_URL=http://192.168.0.135 — no quotes)"
-  );
+  throw new Error("Missing BASE_URL");
 }
 try {
   new URL(cfg.baseURL);

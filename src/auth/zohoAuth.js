@@ -1,7 +1,13 @@
+// src/auth/zohoAuth.js
+
 /**
  * Zoho Authentication Module
  * --------------------------
- * Handles OAuth authentication and base URL resolution for Zoho CRM integration.
+ * Handles OAuth authentication for Zoho CRM integration.
+ * Features:
+ *  - Refresh token workflow
+ *  - Token caching in memory
+ *  - Base URL resolution per Zoho data center (DC)
  */
 
 const axios = require("axios");
@@ -10,6 +16,9 @@ const cfg = require("../config");
 
 const keepAliveAgent = new https.Agent({ keepAlive: true });
 
+/**
+ * Map Zoho DCs to their API & Accounts URLs
+ */
 function zohoDomains(dcRaw) {
   const dc = String(dcRaw || "").toLowerCase();
   const map = {
@@ -17,10 +26,14 @@ function zohoDomains(dcRaw) {
       accounts: "https://accounts.zoho.eu",
       api: "https://www.zohoapis.eu",
     },
+    // Add other DCs if needed: us, in, au, jp, ca
   };
   return map[dc];
 }
 
+/**
+ * Get Zoho API base URL for configured DC
+ */
 function getZohoBaseUrl() {
   const dom = zohoDomains(cfg.zoho.dc);
   if (!dom || !dom.api) {
@@ -31,12 +44,16 @@ function getZohoBaseUrl() {
   return dom.api;
 }
 
+// In-memory cache for OAuth token
 let tokenCache = { accessToken: null, expiresAt: 0 };
 
+/**
+ * Fetch Zoho access token using refresh token, caching it until expiry
+ */
 async function getZohoAccessToken() {
   const now = Date.now();
   if (tokenCache.accessToken && now < tokenCache.expiresAt - 10_000) {
-    return tokenCache.accessToken;
+    return tokenCache.accessToken; // Return cached token if still valid
   }
 
   const dom = zohoDomains(cfg.zoho.dc);

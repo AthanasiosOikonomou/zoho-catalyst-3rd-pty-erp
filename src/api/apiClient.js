@@ -1,16 +1,27 @@
+// src/api/apiClient.js
+
 /**
  * API Client Factory Module
  * -------------------------
- * Creates a configured Axios HTTP client for Galaxy API with keep-alive and
- * request logging (behind DEBUG).
+ * Creates a configured Axios HTTP client for Galaxy API.
+ * Features:
+ *  - Keep-alive HTTPS agent
+ *  - Automatic session cookie injection (ss-id)
+ *  - Debug logging of final request URL and attached cookies
  */
 
 const axios = require("axios");
 const https = require("https");
 const cfg = require("../config");
 
+// Keep-alive agent reused across requests
 const keepAliveAgent = new https.Agent({ keepAlive: true });
 
+/**
+ * Factory to create API client
+ * @param {Function} getSessionId - function returning current sessionId
+ * @returns Axios instance
+ */
 function createApiClient(getSessionId) {
   let base;
   try {
@@ -29,6 +40,7 @@ function createApiClient(getSessionId) {
     httpsAgent: keepAliveAgent,
   });
 
+  // Attach interceptors for logging and session management
   api.interceptors.request.use((req) => {
     req.headers = req.headers || {};
     req.headers["Accept"] = "application/json";
@@ -39,13 +51,14 @@ function createApiClient(getSessionId) {
       const sid = getSessionId?.();
       if (sid) {
         req.headers["Cookie"] = `ss-id=${sid}`;
-        if (process.env.DEBUG === "1") {
+        if (processIS_DEBUG) {
           console.log("[REQ] Attaching ss-id cookie:", sid.slice(0, 6) + "...");
         }
       }
     }
 
-    if (process.env.DEBUG === "1") {
+    // Debug: log final request URL
+    if (IS_DEBUG) {
       try {
         const u = new URL(req.url || "", api.defaults.baseURL);
         if (req.params && typeof req.params === "object") {

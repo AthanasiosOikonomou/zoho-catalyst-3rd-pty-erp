@@ -1,9 +1,16 @@
+// src/accounts/pushAffiliatesZoho.js
+
 /**
  * Upsert Affiliates into Zoho Accounts (enhanced logging)
- * Trader_ID = AFFILIATES_TRDRID
- * Account_Name = AFF_NAME
- * Account_AFM = AFF_TIN        // included to help with mandatory fields, if any
- * Rev_Number = AFFILIATES_REVNUM
+ * -------------------------------------------------------
+ * Maps affiliates from Galaxy to Zoho Accounts and performs upsert operations.
+ * Key fields:
+ *  - Trader_ID = AFFILIATES_TRDRID
+ *  - Account_Name = AFF_NAME
+ *  - Account_AFM = AFF_TIN
+ *  - Rev_Number = AFFILIATES_REVNUM
+ * Deduplicates by Trader_ID keeping latest Rev_Number.
+ * Logs HTTP responses, errors tally, and sample errors for debugging.
  */
 
 const axios = require("axios");
@@ -14,16 +21,25 @@ const cfg = require("../config");
 const keepAliveAgent = new https.Agent({ keepAlive: true });
 const BATCH_SIZE = 100;
 
+// Helper: Normalize string
 const normStr = (v) => (v == null ? undefined : String(v).trim());
+
+// Helper: Normalize ID (uppercase)
 const normId = (v) => {
   const s = normStr(v);
   return s ? s.toUpperCase() : undefined;
 };
+
+// Helper: Convert to number safely
 const num = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
 };
 
+/**
+ * Generic Zoho API call wrapper
+ * Adds OAuth token, handles keep-alive, disables proxy, and validates status.
+ */
 async function zohoApi(method, path, body, params) {
   const token = await getZohoAccessToken();
   const base = getZohoBaseUrl();
@@ -45,6 +61,9 @@ async function zohoApi(method, path, body, params) {
   });
 }
 
+/**
+ * Map Galaxy affiliate row to Zoho account fields
+ */
 function mapAffToZohoAccount(row) {
   return {
     Trader_ID: normId(row?.AFFILIATES_TRDRID),
@@ -57,7 +76,7 @@ function mapAffToZohoAccount(row) {
 
 /**
  * Upsert affiliates and return Zoho ID map: Trader_ID -> ZohoID
- * Enhanced logging: HTTP status, error tallies, and sample errors.
+ * Logs HTTP status, tally of errors, and sample errors for debugging.
  */
 async function upsertAffiliates(affRows, { debug } = {}) {
   const mappedAll = (Array.isArray(affRows) ? affRows : []).map(
@@ -95,6 +114,7 @@ async function upsertAffiliates(affRows, { debug } = {}) {
   const details = [];
   const idByTraderId = new Map();
 
+  // Split into batches
   const groups = Array.from(
     { length: Math.ceil(mapped.length / BATCH_SIZE) },
     (_, i) => mapped.slice(i * BATCH_SIZE, i * BATCH_SIZE + BATCH_SIZE)
