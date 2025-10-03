@@ -1,94 +1,69 @@
 /**
- * Catalyst Job Entry Point
- * Linking Strategy: Affiliates are linked to Customers if they share the same Rev_Number.
- * CRITICAL FIX: The minRev for fetching affiliates and the RevNum Set for filtering are
- * derived ONLY from customers that have a ZH_CUSTOMERS_MEMBER_CARDNO (Card No),
- * based on the assumption that only cardholders have affiliate relationships.
+ * Catalyst Job Entry Point for Quotes/Offers
  */
 
 const cfg = require("./config");
-const { authenticate } = require("./auth/auth.js");
-const { createApiClient } = require("./api/apiClient");
-const { fetchGalaxyData } = require("./accounts/fetchAccountsZoho.js");
-const SessionStore = require("./utils/sessionStore");
+const { authenticate } = require("./auth/auth.js"); // Reused
+const { createApiClient } = require("./api/apiClient"); // Reused
+const SessionStore = require("./utils/sessionStore"); // Reused
+
+// NEW REQUIRES FOR QUOTES
 const {
-  upsertAccounts,
-  getMaxZohoRevNumber,
-} = require("./accounts/pushAccountsZoho.js");
-const { fetchAffiliatesSince } = require("./accounts/fetchAffiliates.js");
-const { upsertAffiliates } = require("./accounts/pushAffiliatesZoho.js");
+  fetchGalaxyOffers,
+  fetchQuoteLines,
+} = require("./offers/fetchQuotesZoho.js");
+const {
+  getMaxZohoQuoteRevNumber,
+  getAccountIdsByTin,
+  ensureProducts,
+  upsertQuotes,
+} = require("./offers/pushQuotesZoho.js");
 
-// -------- helpers --------
+// -------- helpers (parseSinceRevOverride, computeDevLimit, upper are reused) --------
 
-// REMOVED: parseSinceRevOverride - Logic now relies solely on maxZohoRev
-
-/**
- * Computes the development limit based only on the DEV_LIMIT environment variable.
- * All other development/override flags are removed.
- * @returns {number} The limit, or 0 if not set or invalid.
- */
-function computeDevLimit() {
-  const rawLimit = process.env.DEV_LIMIT;
-  const n = Number(rawLimit);
-  if (Number.isFinite(n) && n > 0) {
-    console.log(`[DEV] ENV DEV_LIMIT=${rawLimit} → using devLimit=${n}`);
-    return n;
-  }
-  return 0;
-}
-
-function upper(s) {
-  return String(s || "").toUpperCase();
-}
-
-// NEW FUNCTION: Map Affiliates by their AFFILIATES_REVNUM
-function buildAffiliateMaps(allAffRows) {
-  const affRevToAffTrader = new Map(); // AFFILIATES_REVNUM -> { affTraderId, rev }
-  const byAffTrader = new Map(); // affiliate Trader_ID -> chosen row (for upsert)
-
-  for (const row of allAffRows || []) {
-    const affRev = Number(row?.AFFILIATES_REVNUM) || 0;
-    const affTrader = upper(row?.AFFILIATES_TRDRID || "");
-    if (!affRev || !affTrader) continue;
-
-    // 1. Group by Affiliate Rev Number (for Customer linking):
-    // Choose the LATEST affiliate (by its own AFFILIATES_REVNUM) for a given AFFILIATES_REVNUM group.
-    const prevAffRev = affRevToAffTrader.get(affRev);
-    if (!prevAffRev || affRev > (prevAffRev.rev || 0)) {
-      affRevToAffTrader.set(affRev, { affTraderId: affTrader, rev: affRev });
-    }
-
-    // 2. Deduplicate for Upserting:
-    // Deduplicate affiliates by their Trader_ID (as before) to prepare for upsert.
-    const prevAff = byAffTrader.get(affTrader);
-    if (!prevAff || affRev > (Number(prevAff?.AFFILIATES_REVNUM) || 0)) {
-      byAffTrader.set(affTrader, row);
-    }
-  }
-
-  console.log(
-    `[AFFILIATES] Built RevNum→affiliate map: ${affRevToAffTrader.size} entries.`
-  );
-  const uniqueAffRows = Array.from(byAffTrader.values());
-  console.log(
-    `[AFFILIATES] Unique affiliate rows (before batch filter): ${uniqueAffRows.length}`
-  );
-
-  if (IS_DEBUG) {
-    const sampleRevNum = Array.from(affRevToAffTrader.entries()).slice(0, 5);
-    const sampleAff = uniqueAffRows.slice(0, 5).map((r) => ({
-      AFFILIATES_TRDRID: r.AFFILIATES_TRDRID,
-      AFF_NAME: r.AFF_NAME,
-      AFFILIATES_REVNUM: r.AFFILIATES_REVNUM,
-    }));
-    console.log("[AFFILIATES] Sample RevNum→affiliate (link):", sampleRevNum);
-    console.log(
-      "[AFFILIATES] Sample unique affiliates (before filter):",
-      sampleAff
+function parseSinceRevOverride(maxZohoRev) {
+  if (String(process.env.FETCH_ALL || "").trim() === "1") return 0;
+  const raw = process.env.FETCH_SINCE_REV;
+  if (raw !== undefined) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) return n;
+    console.warn(
+      `[STATE] Ignoring invalid FETCH_SINCE_REV="${raw}". Using watermark ${maxZohoRev}.`
     );
   }
+  return maxZohoRev;
+}
 
-  return { affRevToAffTrader, uniqueAffRows };
+function computeDevLimit() {
+  const rawUpper = process.env.DEV_LIMIT;
+  const rawLower = process.env.dev_limit;
+  const rawMixed = process.env.Dev_Limit;
+
+  const candidates = [rawUpper, rawLower, rawMixed].filter(
+    (v) => v !== undefined
+  );
+  for (const v of candidates) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) {
+      console.log(
+        `[DEV] ENV DEV_LIMIT=${rawUpper ?? ""} dev_limit=${
+          rawLower ?? ""
+        } Dev_Limit=${rawMixed ?? ""} DEV_ONE_ITEM=${
+          process.env.DEV_ONE_ITEM ?? ""
+        } → using devLimit=${n}`
+      );
+      return n;
+    }
+  }
+  const one = process.env.DEV_ONE_ITEM === "1" ? 1 : 0;
+  console.log(
+    `[DEV] ENV DEV_LIMIT=${rawUpper ?? ""} dev_limit=${
+      rawLower ?? ""
+    } Dev_Limit=${rawMixed ?? ""} DEV_ONE_ITEM=${
+      process.env.DEV_ONE_ITEM ?? ""
+    } → using devLimit=${one}`
+  );
+  return one;
 }
 
 // -------- main run --------
@@ -113,21 +88,22 @@ async function runJobOnce() {
 
   await ensureSession();
 
-  // 1) Watermark from Zoho
-  const maxZohoRev = await getMaxZohoRevNumber();
-  console.log(
-    `[STATE] Max Zoho Rev_Number (COQL source of truth): ${maxZohoRev}`
-  );
+  // 1) Watermark from Zoho Quotes (NEW)
+  const maxZohoRev = await getMaxZohoQuoteRevNumber();
+  console.log(`[STATE] Max Zoho Quote Rev_Number: ${maxZohoRev}`);
 
-  // 2) The sinceRev is now always the Zoho watermark (or 0)
-  const sinceRev = maxZohoRev;
+  // 2) Backfill override (FETCH_ALL / FETCH_SINCE_REV)
+  const sinceRev = parseSinceRevOverride(maxZohoRev);
+  if (sinceRev !== maxZohoRev) {
+    console.log(
+      `[STATE] Overriding watermark: sinceRev=${sinceRev} (was ${maxZohoRev})`
+    );
+  }
 
-  const fetchGalaxyDataApi = "/api/glx/views/Customer/custom/zh_Customers_fin";
-
-  // 3) Fetch Galaxy customers above sinceRev
+  // 3) Fetch Galaxy Offers above sinceRev (NEW)
   let res;
   try {
-    res = await fetchGalaxyData(api, fetchGalaxyDataApi, sinceRev);
+    res = await fetchGalaxyOffers(api, sinceRev);
   } catch (err) {
     console.error(
       `[FETCH ERROR] Failed at stage fetch:first. Network/Connection Issue:`,
@@ -140,12 +116,13 @@ async function runJobOnce() {
     };
   }
 
+  // Re-auth logic if session failed
   const s1 = typeof res?.status === "number" ? res.status : -1;
   if (s1 === 401 || s1 === 403) {
     console.warn(`[AUTH] Session invalid (status ${s1}). Re-authenticating...`);
     await doAuthAndPersist();
     try {
-      res = await fetchGalaxyData(api, fetchGalaxyDataApi, sinceRev);
+      res = await fetchGalaxyOffers(api, sinceRev);
     } catch (err) {
       console.error(
         `[FETCH ERROR] Failed at stage fetch:reauth. Network/Connection Issue:`,
@@ -159,14 +136,12 @@ async function runJobOnce() {
     }
   }
 
-  if (!res || typeof res.status !== "number") {
-    return {
-      ok: false,
-      stage: "fetch:bad-response",
-      error: "No/invalid response object from Galaxy",
-    };
-  }
-  if (res.status < 200 || res.status >= 300) {
+  if (
+    !res ||
+    typeof res.status !== "number" ||
+    res.status < 200 ||
+    res.status >= 300
+  ) {
     const bodyMsg = JSON.stringify(res.data) || "No response body";
     console.error(
       `[FETCH ERROR] Galaxy API failed. Status: ${res.status} ${res.statusText}. Response Body: ${bodyMsg}`
@@ -180,153 +155,82 @@ async function runJobOnce() {
     };
   }
 
-  const fullItems = Array.isArray(res.data?.Items) ? res.data.Items : [];
-  console.log(`[CUSTOMERS] Received ${fullItems.length} item(s).`);
+  const fullOffers = Array.isArray(res.data?.Items) ? res.data.Items : [];
+  console.log(`[QUOTES] Received ${fullOffers.length} offer(s).`);
 
   // 4) DEV slicing
   const devLimit = computeDevLimit();
-  // Only slice if a positive limit is set. Otherwise, process all fullItems.
-  const items = devLimit > 0 ? fullItems.slice(0, devLimit) : fullItems;
-  console.log(`[DEV] Using ${items.length} item(s) after DEV_LIMIT slicing.`);
+  const offers = devLimit > 0 ? fullOffers.slice(0, devLimit) : fullOffers;
+  console.log(`[DEV] Using ${offers.length} offer(s) after DEV_LIMIT slicing.`);
 
-  if (!items.length) {
-    console.log("[CUSTOMERS] No items to process after slicing.");
-    return {
-      ok: true,
-      processed: 0,
-      success: 0,
-      failed: 0,
-      affiliatesFetched: 0,
-      affiliatesUpserted: 0,
-    };
+  if (!offers.length) {
+    console.log("[QUOTES] No offers to process after slicing.");
+    return { ok: true, processed: 0 };
   }
 
-  // CRITICAL: Collect THIRDPARTYREVNUMs and full data ONLY from customers with a CardNo
-  const cardHolderRevNums = [];
-  const cardHolderCustomerSamples = [];
-  for (const it of items) {
-    if (
-      it?.ZH_CUSTOMERS_MEMBER_CARDNO != null &&
-      it.ZH_CUSTOMERS_MEMBER_CARDNO !== ""
-    ) {
-      const rev = Number(it.THIRDPARTYREVNUM);
-      if (Number.isFinite(rev) && rev > 0) {
-        cardHolderRevNums.push(rev);
-        cardHolderCustomerSamples.push(it); // Store the full object for diagnostic logging
-      }
+  // 5) Collect TINS for customer lookup
+  const custTins = offers.map((o) => o.CUST_TIN).filter((t) => t);
+
+  // 6) Customer Lookup: CUST_TIN -> Zoho Account ID
+  const accountIdByTin = await getAccountIdsByTin(custTins);
+  console.log(
+    `[QUOTES] Found Zoho IDs for ${accountIdByTin.size} out of ${custTins.length} unique TINS.`
+  );
+
+  // 7) Fetch Quote Lines (Subform data)
+  const quoteLinesByOfferId = new Map();
+  let allQuoteLines = [];
+
+  for (const offer of offers) {
+    const offerId = offer.ID;
+    // Skip fetching lines if the customer isn't in Zoho (the quote will be skipped later anyway)
+    const tin = offer.CUST_TIN;
+    if (!accountIdByTin.has(tin)) continue;
+
+    try {
+      const lineRes = await fetchQuoteLines(api, offerId);
+      const lines = Array.isArray(lineRes.data?.Items)
+        ? lineRes.data.Items
+        : [];
+      quoteLinesByOfferId.set(offerId, lines);
+      allQuoteLines.push(...lines);
+    } catch (err) {
+      console.error(
+        `[FETCH ERROR] Failed to fetch lines for offer ID ${offerId.slice(
+          0,
+          8
+        )}...`,
+        err?.message
+      );
+      quoteLinesByOfferId.set(offerId, []);
     }
   }
-
   console.log(
-    `[REV NUM] In sliced batch: ${cardHolderRevNums.length} item(s) with CardNo and RevNum.`
+    `[QUOTES] Fetched lines for ${quoteLinesByOfferId.size} offers. Total lines: ${allQuoteLines.length}.`
   );
 
-  // *** DIAGNOSTIC LOGGING: Dump the data used for linking ***
-  if (cardHolderCustomerSamples.length > 0) {
-    // Log the full object(s) of the customer(s) the job is trying to link
-    console.log(
-      "[DIAGNOSTIC] CARD-HOLDER CUSTOMER DATA DUMP (CHECK FOR LINKING ID):",
-      cardHolderCustomerSamples.slice(0, 5)
-    );
-  }
+  // 8) Product Sync: Ensure all products in the lines exist in Zoho (NEW)
+  const productIdByCode = await ensureProducts(allQuoteLines);
 
-  // *** NEW STEP: Create a Set of Rev_Numbers from the Card-Holding customers (for filtering) ***
-  const batchRevNumSet = new Set(cardHolderRevNums);
-
-  // 5) Affiliates: single call with minRev from card-holding customers
-  let affiliatesFetched = 0;
-  let affiliatesUpserted = 0;
-  // Map key is the Rev_Number (the customer's THIRDPARTYREVNUM)
-  let affiliateIdByCustomerRevNum = new Map();
-
-  let minRev = sinceRev; // Start with the global watermark
-  if (cardHolderRevNums.length) {
-    // Determine minRev from the current batch's card-holding customers
-    const minRevInBatch = Math.min(...cardHolderRevNums);
-    // Use the minimum of the current batch's minRev and the global watermark (sinceRev)
-    minRev =
-      sinceRev === 0 || minRevInBatch < sinceRev ? minRevInBatch : sinceRev;
-  }
-
-  console.log(`[AFFILIATES] Determined affiliate fetch minRev: ${minRev}.`);
-
-  // ---- Single attempt: minRev determined by batch
-  const affRes = await fetchAffiliatesSince(api, minRev, {
-    timeoutMs: 20000,
-    retry: 1,
-  });
-  let allAff = [];
-  if (affRes?.status >= 200 && affRes.status < 300) {
-    allAff = Array.isArray(affRes.data?.Items) ? affRes.data.Items : [];
-    affiliatesFetched += allAff.length;
-    console.log(
-      `[AFFILIATES] minRev=${minRev} → fetched ${allAff.length} row(s).`
-    );
-  } else {
-    console.warn(
-      `[AFFILIATES] HTTP ${affRes?.status || "??"} on affiliate fetch.`
-    );
-  }
-
-  // Build maps (affRevToAffTrader is built from ALL fetched data)
-  const { affRevToAffTrader, uniqueAffRows } = buildAffiliateMaps(allAff);
-
-  // *** FILTER: Restrict unique affiliates to only those whose RevNum matches a CardHolder's RevNum in the batch ***
-  const relevantAffiliatesToUpsert = uniqueAffRows.filter((affRow) =>
-    batchRevNumSet.has(Number(affRow.AFFILIATES_REVNUM))
+  // 9) Upsert Quotes
+  console.log(`[ZOHO] Calling upsert for ${offers.length} quote item(s)...`);
+  const up = await upsertQuotes(
+    offers,
+    quoteLinesByOfferId,
+    accountIdByTin,
+    productIdByCode
   );
-
-  console.log(
-    `[AFFILIATES] Filtering unique affiliates from ${uniqueAffRows.length} to ${relevantAffiliatesToUpsert.length} based on batch RevNum match.`
-  );
-
-  // Upsert ONLY the filtered, relevant affiliates
-  const affUp = await upsertAffiliates(relevantAffiliatesToUpsert, {
-    debug: IS_DEBUG,
-  });
-  affiliatesUpserted = affUp.success;
-  const idByTraderId = affUp.idByTraderId || new Map();
-
-  // New Linking Step: RevNum -> Affiliate Zoho ID (Only map if the affiliate was successfully upserted)
-  affiliateIdByCustomerRevNum = new Map();
-  for (const [revNum, { affTraderId }] of affRevToAffTrader.entries()) {
-    // Only map if the affiliate was successfully upserted (i.e., exists in idByTraderId)
-    const zid = idByTraderId.get(affTraderId);
-    if (zid) affiliateIdByCustomerRevNum.set(revNum, zid);
-  }
-
-  console.log(
-    `[AFFILIATES] Ready for linking: Customer RevNum→affiliate ZohoID map size: ${affiliateIdByCustomerRevNum.size}`
-  );
-  if (IS_DEBUG) {
-    const sample = Array.from(affiliateIdByCustomerRevNum.entries()).slice(
-      0,
-      5
-    );
-    console.log(
-      "[AFFILIATES] Sample Customer RevNum → affiliate ZohoID:",
-      sample
-    );
-  }
-
-  // 6) Upsert customers with Affiliate_To lookup where available
-  console.log(`[ZOHO] Calling upsert for ${items.length} item(s)...`);
-  const up = await upsertAccounts(items, {
-    debug: IS_DEBUG,
-    // PASSING THE CORRECT REV NUMBER MAP
-    affiliateIdByCustomerRevNum,
-    // affiliateFieldApiName: "Affiliate_To__c"
-  });
   console.log(`[ZOHO] Upsert → success: ${up.success}, failed: ${up.failed}`);
 
   return {
     ok: true,
-    processed: items.length,
+    processed: offers.length,
     success: up.success,
     failed: up.failed,
-    affiliatesFetched,
-    affiliatesUpserted,
-    linkedCustomers: affiliateIdByCustomerRevNum.size,
+    quotesFetched: fullOffers.length,
+    linesFetched: allQuoteLines.length,
+    customersFound: accountIdByTin.size,
+    productsSynced: productIdByCode.size,
   };
 }
 

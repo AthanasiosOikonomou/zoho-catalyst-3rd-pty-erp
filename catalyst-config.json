@@ -2,7 +2,7 @@
   "execution": { "main": "src/index.js" },
   "deployment": {
     "stack": "node20",
-    "name": "master2",
+    "name": "fetchQuotes",
     "type": "job"
   }
 }
