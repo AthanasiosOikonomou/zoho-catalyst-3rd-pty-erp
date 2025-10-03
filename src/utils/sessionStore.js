@@ -1,19 +1,24 @@
+// src/utils/sessionStore.js
+
 /**
  * SessionStore Module
  * -------------------
- * Provides a simple persistent store for session identifiers (sessionId, ssPid)
- * using a local JSON file. Handles loading, saving, and clearing session data.
+ * Provides persistent storage for sessionId and ssPid using a JSON file.
+ * Features:
+ *  - Load sessions on startup
+ *  - Save sessions on update
+ *  - Clear sessions
  */
 
 const fs = require("fs");
 
 /**
- * SessionStore class for managing session data persistence.
+ * SessionStore class
  */
 class SessionStore {
   /**
-   * Constructs a SessionStore instance and loads session data from file.
-   * @param {string} path - Path to the session file.
+   * Constructor
+   * @param {string} path - Path to session JSON file
    */
   constructor(path) {
     this.path = path;
@@ -22,40 +27,39 @@ class SessionStore {
   }
 
   /**
-   * Loads session data from the file, if available.
-   * Silently ignores missing or invalid files.
+   * Load session data from file
    * @private
    */
+
   _load() {
     try {
       const raw = fs.readFileSync(this.path, "utf-8");
       const parsed = JSON.parse(raw);
       this.data.sessionId = parsed?.sessionId || null;
       this.data.ssPid = parsed?.ssPid || null;
-    } catch (_) {
-      // ignore missing file
+    } catch (err) {
+      if (err.code !== "ENOENT") {
+        // Only ignore "File Not Found"
+        console.warn(
+          `[SessionStore] Could not load session file: ${err.message}`
+        );
+      }
     }
   }
 
-  /**
-   * Gets the current sessionId.
-   * @returns {string|null}
-   */
+  /** @returns {string|null} sessionId */
   getSessionId() {
     return this.data.sessionId;
   }
 
-  /**
-   * Gets the current ssPid.
-   * @returns {string|null}
-   */
+  /** @returns {string|null} ssPid */
   getSsPid() {
     return this.data.ssPid;
   }
 
   /**
-   * Sets and persists both sessionId and ssPid.
-   * @param {Object} param0 - Object containing sessionId and ssPid.
+   * Set both sessionId and ssPid and persist
+   * @param {{sessionId:string, ssPid:string}} param0
    */
   setAll({ sessionId = this.data.sessionId, ssPid = this.data.ssPid } = {}) {
     this.data.sessionId = sessionId;
@@ -67,9 +71,7 @@ class SessionStore {
     }
   }
 
-  /**
-   * Clears both sessionId and ssPid, and persists the change.
-   */
+  /** Clear session data */
   clear() {
     this.setAll({ sessionId: null, ssPid: null });
   }

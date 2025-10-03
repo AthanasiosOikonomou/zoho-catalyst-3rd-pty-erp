@@ -1,35 +1,31 @@
+// src/config.js
+
 /**
  * Configuration Module
  * --------------------
- * Loads and validates environment variables for application settings,
- * including API credentials, session management, scheduling, and Zoho integration.
+ * Loads environment variables and validates essential config.
+ * Features:
+ *  - Base URL validation
+ *  - Credentials check
+ *  - Session file and Zoho config
  */
 
-/**
- * Cleans up a string value by removing leading/trailing quotes and whitespace.
- * Useful for sanitizing .env values on Windows.
- * @param {string} s - The string to clean.
- * @returns {string} The cleaned string.
- */
 function cleanUrl(s) {
   return String(s || "")
     .trim()
-    .replace(/^"+|"+$/g, "") // strip leading/trailing "
-    .replace(/^'+|'+$/g, ""); // strip leading/trailing '
+    .replace(/^"+|"+$/g, "")
+    .replace(/^'+|'+$/g, "");
 }
 
-/**
- * Application configuration object.
- * Populated from environment variables and includes validation for required fields.
- */
 const cfg = {
   baseURL: cleanUrl(process.env.BASE_URL),
   username: process.env.AUTH_USERNAME,
   password: process.env.AUTH_PASSWORD,
   ssPid: process.env.SS_PID_COOKIE || null,
-  cronExpr: process.env.CRON || "* * * * *", // dev default: every minute
-  timeoutMs: Number(process.env.TIMEOUT_MS || 15000),
+  cronExpr: process.env.CRON || "* * * * *",
+  timeoutMs: Number(process.env.TIMEOUT_MS || 20000),
   sessionFile: process.env.SESSION_FILE || "./.session.json",
+  IS_DEBUG: process.env.DEBUG === "1",
   zoho: {
     clientId: process.env.ZOHO_CLIENT_ID,
     clientSecret: process.env.ZOHO_CLIENT_SECRET,
@@ -38,11 +34,9 @@ const cfg = {
   },
 };
 
-// Validate required configuration values early and provide helpful error messages.
+// Validate mandatory config
 if (!cfg.baseURL) {
-  throw new Error(
-    "Missing BASE_URL in .env (e.g., BASE_URL=http://192.168.0.135 — no quotes)"
-  );
+  throw new Error("Missing BASE_URL");
 }
 try {
   new URL(cfg.baseURL);
